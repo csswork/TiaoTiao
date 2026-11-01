@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">TiaoTiao</string>
-    <string name="accessibility_description">仅在你选择的应用进入前台后，短时读取界面控件并点击已经确认的开屏跳过目标。新方案由 Jev 建议，试跳后需要你确认结果。可随时在 TiaoTiao 中暂停或在系统设置关闭服务。</string>
+    <string name="accessibility_description">在所选应用启动后短时识别并跳过开屏广告。大麦智能试用使用截图、端侧识别、受限点击和自动结果检查；开启云端分析后会发送遮挡非必要文字的画面。其他应用沿用已验证规则和普通确认流程。可随时暂停或关闭服务。</string>
 </resources>

@@ -19,6 +19,8 @@ data class AppSettings(
     val jevProvider: JevProvider = JevProvider.TYPE_SAFE,
     val syncUrl: String = "",
     val syncEtag: String = "",
+    val smartDamai: Boolean = true,
+    val visionModel: String = "google/gemini-2.5-flash-lite",
 )
 @Serializable data class LogEntry(val at: Long, val packageName: String, val message: String)
 @Serializable data class StoredSample(val ruleId: String, val source: String, val screen: ScreenSnapshot)
@@ -31,10 +33,46 @@ data class AppSettings(
 
 class AppRepository(private val context: Context) {
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+    private val baselinePrefs = context.getSharedPreferences("visual_baselines", Context.MODE_PRIVATE)
+    fun visualBaseline(scene: String): Long = baselinePrefs.getLong(scene,0)
+    fun recordVisualBaseline(scene: String, duration: Long) {
+        if (duration !in 1000..15_000) return
+        val old=visualBaseline(scene)
+        baselinePrefs.edit().putLong(scene,if (old>0) minOf(old,duration) else duration).apply()
+    }
     private val rulesFile = AtomicFile(File(context.filesDir, "rules.json"))
     private val logsFile = AtomicFile(File(context.filesDir, "logs.json"))
     private val samplesDir = File(context.filesDir, "samples").apply { mkdirs() }
     val vault = SecretVault(context)
+    private val visualFile = AtomicFile(File(context.filesDir, "visual_rules.json"))
+    private val _visualRules = MutableStateFlow(runCatching {
+        VisualPolicy.decode(String(visualFile.readFully(), Charsets.UTF_8)).rules
+    }.getOrElse {
+        if (visualFile.baseFile.exists()) visualFile.baseFile.copyTo(File(context.filesDir,"visual_rules.recovery.json"),overwrite=true)
+        emptyList()
+    })
+    val visualRules = _visualRules.asStateFlow()
+    @Synchronized fun putVisual(rule: VisualRule) {
+        VisualPolicy.validate(rule)
+        val next = _visualRules.value.filterNot { it.id == rule.id } + rule
+        require(next.size <= 100)
+        write(visualFile, ruleJson.encodeToString(VisualBundle(rules = next)))
+        _visualRules.value = next
+    }
+    @Synchronized fun removeVisual(id: String) {
+        val next = _visualRules.value.filterNot { it.id == id }
+        write(visualFile, ruleJson.encodeToString(VisualBundle(rules = next))); _visualRules.value = next
+    }
+    fun exportVisual() = ruleJson.encodeToString(VisualBundle(rules = _visualRules.value.filter { it.active() }))
+    @Synchronized fun importVisual(text: String): Int {
+        var count = 0
+        VisualPolicy.import(text).forEach { r ->
+            if (_visualRules.value.none { it.behavior() == r.behavior() }) {
+                putVisual(if (_visualRules.value.any { it.id == r.id }) r.copy(id = UUID.randomUUID().toString()) else r); count++
+            }
+        }
+        return count
+    }
     private val _settings = MutableStateFlow(runCatching { ruleJson.decodeFromString<AppSettings>(prefs.getString("settings", "")!!) }.getOrDefault(AppSettings()))
     val settings = _settings.asStateFlow()
     private var modelConfigGeneration = 0L

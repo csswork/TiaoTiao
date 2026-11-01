@@ -66,6 +66,7 @@ class MainActivity : ComponentActivity() {
     @Composable private fun App() {
         val settings by repository.settings.collectAsStateWithLifecycle()
         val rules by repository.rules.collectAsStateWithLifecycle()
+        val visualRules by repository.visualRules.collectAsStateWithLifecycle()
         val logs by repository.logs.collectAsStateWithLifecycle()
         val connected by repository.connected.collectAsStateWithLifecycle()
         val samples by repository.sampleCount.collectAsStateWithLifecycle()
@@ -80,6 +81,7 @@ class MainActivity : ComponentActivity() {
         var jsonRule by remember { mutableStateOf<SkipRule?>(null) }
         var hasJevKey by remember { mutableStateOf(repository.vault.get("jevKey").isNotBlank()) }
         var focusJevKey by remember { mutableStateOf(false) }
+        var exportSmart by remember { mutableStateOf(false) }
         fun notify(message: String) { scope.launch { snackbar.showSnackbar(message) } }
         fun task(action: suspend () -> String) {
             if (busy) return
@@ -94,12 +96,13 @@ class MainActivity : ComponentActivity() {
         val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) task {
                 val text = requireNotNull(contentResolver.openInputStream(uri)).use { String(it.readLimited(RuleCodec.MAX_BYTES), Charsets.UTF_8) }
-                "已导入 ${repository.importRules(text)} 条新规则，试跳确认后可自动使用"
+                if (text.contains("\"TiaoTiaoVisualRules\"")) "已导入 ${repository.importVisual(text)} 条智能候选，等待本机自动检查"
+                else "已导入 ${repository.importRules(text)} 条新规则，试跳确认后可自动使用"
             }
         }
         val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
             if (uri != null) task {
-                requireNotNull(contentResolver.openOutputStream(uri, "wt")).use { it.write(repository.exportVerified().toByteArray(Charsets.UTF_8)) }
+                requireNotNull(contentResolver.openOutputStream(uri, "wt")).use { it.write((if (exportSmart) repository.exportVisual() else repository.exportVerified()).toByteArray(Charsets.UTF_8)) }
                 "已导出本机已验证规则"
             }
         }
@@ -179,6 +182,18 @@ class MainActivity : ComponentActivity() {
                                 Stat("应用", settings.packages.size.toString(), Modifier.weight(1f))
                             }
                         }
+                        item { SectionCard("大麦 · 智能自动学习试用") {
+                            Text("自动采样 → 视觉 AI 学习 → 自动尝试 → 结果检查。方案会缓存，页面结束后仍可继续学习。")
+                            Row(verticalAlignment=Alignment.CenterVertically) {
+                                Text("智能学习",Modifier.weight(1f))
+                                Switch(checked=settings.smartDamai,onCheckedChange={ repository.updateSettings { s -> s.copy(smartDamai=it) } })
+                            }
+                            Text("智能规则：${visualRules.count { it.active() }} 条已启用，${visualRules.count { it.state==VisualRuleState.CANDIDATE }} 条学习中",style=MaterialTheme.typography.bodySmall)
+                            OutlinedButton(onClick={
+                                if (!connected || !settings.enabled) notify("请先开启服务和自动跳过")
+                                else startActivity(Intent(this@MainActivity,SmartDemoActivity::class.java))
+                            }) { Text("智能视觉演示（无需确认）") }
+                        } }
                         item { SectionCard("开始使用") {
                             Text(if (connected) "● 无障碍服务已连接" else "○ 无障碍服务未连接", color = Pine)
                             Text("开启服务后，到「应用」选择需要处理的应用。小米系统如回收服务，可从这里重新开启。", style = MaterialTheme.typography.bodyMedium)
@@ -202,7 +217,7 @@ class MainActivity : ComponentActivity() {
                         item { Text("JSON 保存页面条件与点击目标。导入规则先试跳确认；仅导出本机已验证的规则。", style = MaterialTheme.typography.bodyMedium) }
                         item { Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             OutlinedButton(onClick = { importer.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) }, enabled = !busy) { Text("导入 JSON") }
-                            OutlinedButton(onClick = { exporter.launch("tiaotiao-rules.json") }, enabled = !busy) { Text("导出") }
+                            OutlinedButton(onClick = { exportSmart=false; exporter.launch("tiaotiao-rules.json") }, enabled = !busy) { Text("导出") }
                             Button(onClick = {
                                 task {
                                     val dir = File(cacheDir, "shared").apply { mkdirs() }
@@ -217,6 +232,21 @@ class MainActivity : ComponentActivity() {
                                 }
                             }, enabled = !busy) { Text("分享") }
                         } }
+                        item { SectionCard("智能规则 · 自动检查") {
+                            Text("大麦试用规则由 AI 自动学习。两次不同会话的 AI 与时序检查通过后启用；你随时可以停用或反馈点错。")
+                            OutlinedButton(onClick={ exportSmart=true;exporter.launch("tiaotiao-visual-rules.json") },enabled=!busy) { Text("导出智能 JSON") }
+                        } }
+                        items(visualRules.sortedByDescending { it.createdAt },key={ "visual-${it.id}" }) { r -> SectionCard(r.packageName+" · "+when {
+                            r.state==VisualRuleState.PAUSED -> "已暂停"; r.active() -> "已启用";else -> "学习中"
+                        }) {
+                            Text(r.lastResult)
+                            Text("自动检查 ${r.successfulSessions()}/2 · ${r.source}",style=MaterialTheme.typography.bodySmall)
+                            Row {
+                                TextButton(onClick={ repository.putVisual(r.copy(state=VisualRuleState.PAUSED,lastResult="用户反馈点错，已停用")) }) { Text("点错了／停用") }
+                                if (r.state==VisualRuleState.PAUSED) TextButton(onClick={ repository.putVisual(r.copy(state=VisualRuleState.CANDIDATE,evidence=emptyList(),lastResult="等待重新自动检查")) }) { Text("重新学习") }
+                                TextButton(onClick={ repository.removeVisual(r.id) }) { Text("删除") }
+                            }
+                        } }
                         if (rules.isEmpty()) item { EmptyState("规则库还是空的", "先运行演示，或开启 Jev 后打开选中的应用。") }
                         items(rules.sortedByDescending { it.createdAt }, key = { it.id }) { rule ->
                             RuleCard(rule, repository, { openTarget(rule) }, { jsonRule = rule }, { task { it(); "已更新规则" } })
@@ -227,7 +257,7 @@ class MainActivity : ComponentActivity() {
                             Text("处理记录", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
                             TextButton(onClick = { task { repository.clearLogs(); "已清空记录" } }) { Text("清空") }
                         } }
-                        item { Text("记录保留最近 150 条。发起点击表示系统接受动作，实际试跳结果由你确认。", style = MaterialTheme.typography.bodyMedium) }
+                        item { Text("记录保留最近 150 条。智能试用会自动检查结果；原有普通规则继续使用人工确认流程。", style = MaterialTheme.typography.bodyMedium) }
                         if (logs.isEmpty()) item { EmptyState("暂无记录", "服务开始处理后，会在这里显示结果。") }
                         items(logs) { entry -> SectionCard(entry.message) {
                             Text(entry.packageName.ifBlank { "TiaoTiao 服务" }, style = MaterialTheme.typography.bodySmall)
@@ -243,11 +273,11 @@ class MainActivity : ComponentActivity() {
             }
         }
         if (disclosure) AlertDialog(onDismissRequest = { disclosure = false }, title = { Text("开启 TiaoTiao 无障碍服务") }, text = {
-            Text("TiaoTiao 会在你选择的应用进入前台后，短时读取界面结构和跳过按钮特征，并执行已经验证的点击方案。\n\n新方案需要试跳后由你确认。你可随时暂停或关闭服务。Jev 云端分析需要在设置中另行开启。")
+            Text("TiaoTiao 在选定应用启动后短时读取界面并执行跳过。大麦智能试用还会截图、端侧文字识别、自动尝试跳过并检查结果；其他应用沿用普通确认流程。你可随时暂停。云端分析需另行开启。")
         }, confirmButton = { TextButton(onClick = { disclosure = false; startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) { Text("了解，前往设置") } },
             dismissButton = { TextButton(onClick = { disclosure = false }) { Text("取消") } })
         if (cloudDisclosure) AlertDialog(onDismissRequest = { cloudDisclosure = false }, title = { Text("允许 Jev 分析未知界面") }, text = {
-            Text("对你选中的应用，TiaoTiao 会把筛选后的控件信息（包名、版本、控件 ID、位置及跳过/广告等允许词）发送到设置中保存的接入服务及其模型提供方（TypeSafe 直连或 Vercel AI Gateway）。第一版不发送截图或输入框内容。\n\n仅在本地没有匹配规则时请求，已验证规则可离线使用。你可随时关闭。")
+            Text("普通规则发送筛选后的控件信息。大麦智能试用会向 Vercel 及视觉模型发送遮挡非必要文字的开屏和点击前后画面。图片最多缓存 8 份，识别成功后删除，未识别画面在 24 小时后清理，不导出分享。可随时关闭智能学习或云端分析。")
         }, confirmButton = { TextButton(onClick = { repository.updateSettings { it.copy(cloudEnabled = true) }; cloudDisclosure = false }) { Text("允许") } },
             dismissButton = { TextButton(onClick = { cloudDisclosure = false }) { Text("取消") } })
         jsonRule?.let { rule -> AlertDialog(onDismissRequest = { jsonRule = null }, title = { Text("规则 JSON") }, text = {
@@ -297,6 +327,7 @@ class MainActivity : ComponentActivity() {
         var model by remember(settings.model) { mutableStateOf(settings.model) }
         var provider by remember(settings.jevProvider) { mutableStateOf(settings.jevProvider) }
         var key by remember { mutableStateOf("") }
+        var visionModel by remember(settings.visionModel) { mutableStateOf(settings.visionModel) }
         val listState = rememberLazyListState()
         val keyFocusRequester = remember { FocusRequester() }
         val keyboard = LocalSoftwareKeyboardController.current
@@ -355,6 +386,15 @@ class MainActivity : ComponentActivity() {
                     color = if (connection.state == ConnectionState.FAILED) Color(0xFF9C3B20) else Pine)
                 Text("连接测试会发送一条固定测试请求，不读取其他应用的内容。", style = MaterialTheme.typography.bodySmall)
             } }
+            item { SectionCard("大麦 · 视觉学习模型") {
+                Text("沿用 Vercel 网关密钥。端侧文字识别随安装包提供；未知画面由视觉模型学习，点击后自动检查结果。")
+                Text("截图遮挡非必要文字后发送至 Vercel 及模型提供方；最多缓存 8 份，成功后删除，未识别画面按 24 小时过期清理。",style=MaterialTheme.typography.bodySmall)
+                OutlinedTextField(value=visionModel,onValueChange={visionModel=it},label={Text("视觉模型")},modifier=Modifier.fillMaxWidth(),singleLine=true)
+                Button(onClick={ task {
+                    require(visionModel.trim().matches(Regex("[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"))) { "请检查模型名称" }
+                    repository.updateSettings { it.copy(visionModel=visionModel.trim()) };"已保存视觉模型"
+                } },enabled=!busy) { Text("保存视觉模型") }
+            } }
             item { SectionCard("JSON 同步 · 你的 HTTPS / WebDAV 空间") {
                 Text("填写一个可 GET / PUT 的 JSON 文件地址。手动同步本机已验证规则；更新远端需要服务器支持 ETag 条件写入。", style = MaterialTheme.typography.bodyMedium)
                 OutlinedTextField(value = url, onValueChange = { url = it }, label = { Text("https://…/tiaotiao-rules.json") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
@@ -378,9 +418,9 @@ class MainActivity : ComponentActivity() {
             item { SectionCard("本地数据") {
                 Text("已保存 $samples 个经过筛选的节点样本，最多保留 100 个。默认不上传样本。")
                 Text("第一版使用节点识别，不采集截图。图片分析会在后续单独验证后加入。", style = MaterialTheme.typography.bodySmall)
-                TextButton(onClick = { task { repository.clearSamples(); "已清空本地样本" } }, enabled = !busy) { Text("清空样本") }
+                TextButton(onClick = { task { repository.clearSamples(); (application as TiaoApplication).visualLearner.clearPending(); "已清空本地节点与视觉学习样本" } }, enabled = !busy) { Text("清空样本") }
             } }
-            item { Text("TiaoTiao 0.1.6 · Android 8.0 及以上\n服务被系统关闭后，需在系统设置重新开启。", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
+            item { Text("TiaoTiao 0.2.0 · 智能视觉试用需要 Android 11 及以上\n服务被系统关闭后，需在系统设置重新开启。", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
         }
     }
 }

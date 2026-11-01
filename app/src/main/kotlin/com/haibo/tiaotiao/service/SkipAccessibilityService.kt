@@ -1,6 +1,8 @@
 package com.haibo.tiaotiao.service
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
 import android.app.KeyguardManager
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -43,6 +45,13 @@ class SkipAccessibilityService : AccessibilityService() {
     private var targetEventPackage: String? = null
     private var targetEventAt = 0L
     private var lastReadState = "尚未读取界面"
+    private var smartPilot: SmartPilot? = null
+    private fun visualDemo(screen: ScreenSnapshot) = screen.packageName == packageName &&
+        screen.nodes.any { it.resourceId.endsWith(":id/smart_demo_ad") }
+    private fun pilot() = smartPilot ?: SmartPilot(this,
+        current = { observe()?.use { it.screen } },
+        open = { generation, pkg -> repository.settings.value.enabled && gate.generation == generation && gate.isOpen(pkg,SystemClock.elapsedRealtime()) },
+        tap = { generation, screen, area -> smartTap(generation,screen,area) }).also { smartPilot = it }
     private val reportedReasons = mutableSetOf<String>()
     private fun report(pkg: String, reason: String, message: String) {
         if (diagnosticPackage != pkg) { diagnosticPackage = pkg; reportedReasons.clear() }
@@ -53,6 +62,7 @@ class SkipAccessibilityService : AccessibilityService() {
         serviceRef = WeakReference(this)
         repository.connected.value = true
         repository.log("", "无障碍服务已连接")
+        (application as TiaoApplication).visualLearner.resume()
         scope.launch {
             repository.settings.collectLatest { settings ->
                 scanJob?.cancel()
@@ -82,6 +92,7 @@ class SkipAccessibilityService : AccessibilityService() {
                 val actualPackage = root?.packageName?.toString()
                 @Suppress("DEPRECATION") root?.recycle()
                 if (actualPackage != null && actualPackage != packageName && actualPackage !in repository.settings.value.packages) {
+                    smartPilot?.leaving(actualPackage)
                     scanJob?.cancel(); gate.observeWindow(actualPackage, true, SystemClock.elapsedRealtime()); hideOverlay()
                     targetEventPackage = null
                     diagnosticPackage = null; reportedReasons.clear()
@@ -103,7 +114,7 @@ class SkipAccessibilityService : AccessibilityService() {
                     scan()
                     val now = SystemClock.elapsedRealtime()
                     val target = targetEventPackage
-                    if (target == null || target !in repository.settings.value.packages || !repository.settings.value.enabled ||
+                    if (target == null || (target !in repository.settings.value.packages && target != packageName) || !repository.settings.value.enabled ||
                         now >= deadline || now - targetEventAt >= 10_000 || gate.actionDispatched ||
                         (gate.packageName == target && !gate.isOpen(target, now))) break
                     delay(160)
@@ -169,7 +180,7 @@ class SkipAccessibilityService : AccessibilityService() {
         }
     }
     private fun isDemo(screen: ScreenSnapshot) = screen.packageName == packageName && screen.nodes.any { it.resourceId.endsWith(":id/demo_skip") }
-    private fun eligible(screen: ScreenSnapshot) = (screen.packageName in repository.settings.value.packages && screen.packageName != packageName) || isDemo(screen)
+    private fun eligible(screen: ScreenSnapshot) = (screen.packageName in repository.settings.value.packages && screen.packageName != packageName) || isDemo(screen) || visualDemo(screen)
 
     private suspend fun scan() {
         if (!repository.settings.value.enabled) return
@@ -194,6 +205,12 @@ class SkipAccessibilityService : AccessibilityService() {
             return
         }
         report(screen.packageName, "begin", "开始检测开屏界面")
+        if (android.os.Build.VERSION.SDK_INT >= 30 && (visualDemo(screen) ||
+            (screen.packageName == "cn.damai" && repository.settings.value.smartDamai))) {
+            if (visualDemo(screen)) { targetEventPackage = packageName; targetEventAt = now }
+            pilot().scan(screen,gate.generation)
+            return
+        }
         val fingerprint = screen.fingerprint()
         val rules = repository.rules.value
         when (val local = RuleEngine.resolveVerified(rules, screen)) {
@@ -284,6 +301,32 @@ class SkipAccessibilityService : AccessibilityService() {
             }
         }
     }
+    private suspend fun smartTap(generation: Long, screen: ScreenSnapshot, area: Area): Boolean {
+        if (!repository.settings.value.enabled || gate.generation != generation || !gate.isOpen(screen.packageName,SystemClock.elapsedRealtime())) return false
+        val observation = observe() ?: return false
+        observation.use {
+            val fresh=it.screen
+            if (fresh.packageName != screen.packageName || fresh.windowId != screen.windowId || fresh.fingerprint() != screen.fingerprint()) return false
+            if (screen.packageName != "cn.damai" && !visualDemo(screen)) return false
+            val node=VisualPolicy.clickableTarget(fresh,area)
+            if (node!=null) {
+                gate.dispatched()
+                val accepted=it.handles[node.path]?.performAction(AccessibilityNodeInfo.ACTION_CLICK)==true
+                repository.reportDetection(screen.packageName,if (accepted) "视觉目标已关联当前控件并发起点击" else "当前控件未接受点击，停止本轮")
+                return accepted
+            }
+        }
+        gate.dispatched()
+        val path = Path().apply { moveTo((area.left+area.right)/2*screen.width,(area.top+area.bottom)/2*screen.height) }
+        val gesture = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path,0,60)).build()
+        return suspendCancellableCoroutine { c ->
+            val accepted = dispatchGesture(gesture,object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription) { if (c.isActive) c.resumeWith(Result.success(true)) }
+                override fun onCancelled(gestureDescription: GestureDescription) { if (c.isActive) c.resumeWith(Result.success(false)) }
+            },null)
+            if (!accepted && c.isActive) c.resumeWith(Result.success(false))
+        }
+    }
     private fun observeClickEffect(rule: SkipRule, generation: Long) {
         scope.launch {
             delay(900)
@@ -350,9 +393,11 @@ class SkipAccessibilityService : AccessibilityService() {
         writer.println("enabled=${repository.settings.value.enabled}, scanning=${scanJob?.isActive == true}, session=${gate.generation}, dispatched=${gate.actionDispatched}")
         writer.println("sessionPackage=${gate.packageName}, eventPackage=$targetEventPackage, eventWindow=$eventWindowId")
         writer.println("lastRead=$lastReadState")
+        smartPilot?.let { writer.println(it.summary()) }
         windows.forEach { writer.println("window=${it.id}, type=${it.type}, focused=${it.isFocused}, active=${it.isActive}") }
     }
     override fun onDestroy() {
+        smartPilot?.close()
         hideOverlay(); scope.cancel(); repository.connected.value = false
         if (instance === this) serviceRef = WeakReference(null)
         super.onDestroy()
