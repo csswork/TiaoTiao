@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">跳跳</string>
+    <string name="accessibility_description">仅在你选择的应用进入前台后，短时读取界面控件并点击已经确认的开屏跳过目标。新方案由 Jev 建议，试跳后需要你确认结果。可随时在跳跳中暂停或在系统设置关闭服务。</string>
+</resources>

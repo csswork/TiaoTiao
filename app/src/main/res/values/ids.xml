@@ -1,0 +1,6 @@
+<resources>
+    <item name="demo_ad" type="id" />
+    <item name="demo_skip" type="id" />
+    <item name="demo_home" type="id" />
+    <item name="demo_login_skip" type="id" />
+</resources>
