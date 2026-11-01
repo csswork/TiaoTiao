@@ -2,6 +2,14 @@
 
 日期：2026-11-01（Asia/Shanghai）。
 
+## 0.1.2 首页密钥入口
+
+- 新安装包：`TiaoTiao-0.1.2-debug.apk`，versionCode 3。
+- 未配置 Jev 密钥时，首页顶部显示高对比度提示卡片和“填写 API Key”按钮。
+- 点击后跳转设置、定位密钥输入框并弹出键盘；保存后收起键盘，首页提示隐藏；清除密钥后提示恢复。
+- 已通过 APK 构建和 Android Lint（无 Error/Fatal）。在独立 API 36 模拟器实际验证入口、自动聚焦、保存/清除后的提示状态，以及普通进入设置时不自动聚焦。
+- 交互验证仅使用本地假密钥，云端分析保持关闭，未发起模型调用。截图见 `screenshots/home-key-entry.png` 和 `screenshots/key-entry-focused.png`。
+
 ## 0.1.1 名称更新
 
 - 新安装包：`TiaoTiao-0.1.1-debug.apk`，versionCode 2。

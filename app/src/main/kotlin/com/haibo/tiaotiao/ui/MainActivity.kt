@@ -9,9 +9,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
@@ -19,6 +21,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -68,6 +74,8 @@ class MainActivity : ComponentActivity() {
         var disclosure by remember { mutableStateOf(false) }
         var cloudDisclosure by remember { mutableStateOf(false) }
         var jsonRule by remember { mutableStateOf<SkipRule?>(null) }
+        var hasJevKey by remember { mutableStateOf(repository.vault.get("jevKey").isNotBlank()) }
+        var focusJevKey by remember { mutableStateOf(false) }
         fun notify(message: String) { scope.launch { snackbar.showSnackbar(message) } }
         fun task(action: suspend () -> String) {
             if (busy) return
@@ -111,10 +119,25 @@ class MainActivity : ComponentActivity() {
                         icon = { Text(listOf("⌂", "▦", "≡", "◷", "⚙")[index], style = MaterialTheme.typography.titleLarge) }, label = { Text(title) })
                 }
             } }) { padding ->
-            Column(Modifier.fillMaxSize().padding(padding)) {
+            Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
                 if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 when (tab) {
                     0 -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        if (!hasJevKey) item(key = "missing_jev_key") {
+                            Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFFFFE8BF)),
+                                border = BorderStroke(1.dp, Color(0xFFE3BC77))) {
+                                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Text("尚未填写 Jev API Key", style = MaterialTheme.typography.titleLarge,
+                                        fontWeight = FontWeight.Bold, color = Color(0xFF654516))
+                                    Text("填写密钥并开启云端分析，即可使用 Jev 识别新的开屏广告。",
+                                        style = MaterialTheme.typography.bodyMedium, color = Color(0xFF654516))
+                                    Button(onClick = { focusJevKey = true; tab = 4 }, modifier = Modifier.fillMaxWidth()) {
+                                        Text("填写 API Key")
+                                    }
+                                }
+                            }
+                        }
                         item {
                             Card(colors = CardDefaults.cardColors(containerColor = Pine), shape = RoundedCornerShape(24.dp)) {
                                 Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -189,7 +212,11 @@ class MainActivity : ComponentActivity() {
                             Text(time(entry.at), style = MaterialTheme.typography.labelSmall, color = Pine)
                         } }
                     }
-                    4 -> SettingsPage(repository, busy, samples, { cloudDisclosure = true }, { task(it) })
+                    4 -> SettingsPage(repository = repository, busy = busy, samples = samples,
+                        hasJevKey = hasJevKey, focusJevKey = focusJevKey,
+                        onKeyEntryHandled = { focusJevKey = false },
+                        onKeyPresenceChanged = { hasJevKey = it },
+                        allowCloud = { cloudDisclosure = true }, task = { task(it) })
                 }
             }
         }
@@ -240,15 +267,30 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    @Composable private fun SettingsPage(repository: AppRepository, busy: Boolean, samples: Int, allowCloud: () -> Unit, task: (suspend () -> String) -> Unit) {
+    @Composable private fun SettingsPage(repository: AppRepository, busy: Boolean, samples: Int,
+        hasJevKey: Boolean, focusJevKey: Boolean, onKeyEntryHandled: () -> Unit,
+        onKeyPresenceChanged: (Boolean) -> Unit, allowCloud: () -> Unit, task: (suspend () -> String) -> Unit) {
         val settings by repository.settings.collectAsStateWithLifecycle()
         var model by remember(settings.model) { mutableStateOf(settings.model) }
         var key by remember { mutableStateOf("") }
-        var keySaved by remember { mutableStateOf(repository.vault.get("jevKey").isNotBlank()) }
+        val listState = rememberLazyListState()
+        val keyFocusRequester = remember { FocusRequester() }
+        val keyboard = LocalSoftwareKeyboardController.current
+        val focusManager = LocalFocusManager.current
         var url by remember(settings.syncUrl) { mutableStateOf(settings.syncUrl) }
         var authorization by remember { mutableStateOf("") }
         var authSaved by remember { mutableStateOf(repository.vault.get("syncAuthorization").isNotBlank()) }
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        LaunchedEffect(focusJevKey) {
+            if (focusJevKey) {
+                listState.scrollToItem(1)
+                withFrameNanos { }
+                keyFocusRequester.requestFocus()
+                keyboard?.show()
+                onKeyEntryHandled()
+            }
+        }
+        LazyColumn(Modifier.fillMaxSize().imePadding(), state = listState,
+            contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             item { Text("按你的方式运行", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold) }
             item { SectionCard("Jev · 未知界面分析") {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -256,20 +298,23 @@ class MainActivity : ComponentActivity() {
                     Switch(checked = settings.cloudEnabled, modifier = Modifier.semantics { contentDescription = "允许 Jev 云端分析" }, onCheckedChange = { if (it) allowCloud() else repository.updateSettings { s -> s.copy(cloudEnabled = false) } })
                 }
                 Text("使用 TypeSafe 官方 API。API Key 在手机上加密保存，不进入规则文件。", style = MaterialTheme.typography.bodyMedium)
-                OutlinedTextField(value = key, onValueChange = { key = it }, label = { Text(if (keySaved) "API Key 已保存，留空保持" else "Jev API Key") }, singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
+                OutlinedTextField(value = key, onValueChange = { key = it }, label = { Text(if (hasJevKey) "API Key 已保存，留空保持" else "Jev API Key") }, singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().focusRequester(keyFocusRequester), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
                 OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("模型名称") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(onClick = { task {
                         require(model.trim().matches(Regex("[A-Za-z0-9._-]{1,80}"))) { "模型名称格式无效" }
                         if (key.isNotBlank()) repository.vault.set("jevKey", key.trim())
                         repository.updateSettings { it.copy(model = model.trim()) }
-                        withContext(Dispatchers.Main) { key = ""; keySaved = repository.vault.get("jevKey").isNotBlank() }
+                        withContext(Dispatchers.Main) {
+                            key = ""; onKeyPresenceChanged(repository.vault.get("jevKey").isNotBlank())
+                            focusManager.clearFocus(); keyboard?.hide()
+                        }
                         "已保存 Jev 配置"
                     } }, enabled = !busy) { Text("保存配置") }
                     TextButton(onClick = { task {
                         repository.vault.set("jevKey", ""); repository.updateSettings { it.copy(cloudEnabled = false) }
-                        withContext(Dispatchers.Main) { key = ""; keySaved = false }; "已清除密钥并关闭云端分析"
+                        withContext(Dispatchers.Main) { key = ""; onKeyPresenceChanged(false) }; "已清除密钥并关闭云端分析"
                     } }, enabled = !busy) { Text("清除密钥") }
                 }
             } }
@@ -298,7 +343,7 @@ class MainActivity : ComponentActivity() {
                 Text("第一版使用节点识别，不采集截图。图片分析会在后续单独验证后加入。", style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = { task { repository.clearSamples(); "已清空本地样本" } }, enabled = !busy) { Text("清空样本") }
             } }
-            item { Text("TiaoTiao 0.1.1 · Android 8.0 及以上\n服务被系统关闭后，需在系统设置重新开启。", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
+            item { Text("TiaoTiao 0.1.2 · Android 8.0 及以上\n服务被系统关闭后，需在系统设置重新开启。", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
         }
     }
 }
