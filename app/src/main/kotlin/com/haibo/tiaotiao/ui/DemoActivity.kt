@@ -33,7 +33,7 @@ class DemoActivity : Activity() {
             addView(TextView(context).apply { text = "可在底部浮层确认刚才的结果。"; textSize = 16f })
             addView(Button(context).apply { id = R.id.demo_login_skip; text = "跳过登录"; setOnClickListener { } })
             addView(Button(context).apply { text = "再看一次模拟开屏"; setOnClickListener { showAd() } })
-            addView(Button(context).apply { text = "返回跳跳"; setOnClickListener { finish() } })
+            addView(Button(context).apply { text = "返回 TiaoTiao"; setOnClickListener { finish() } })
         })
     }
 }

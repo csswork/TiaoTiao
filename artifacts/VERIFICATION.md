@@ -2,6 +2,13 @@
 
 日期：2026-11-01（Asia/Shanghai）。
 
+## 0.1.1 名称更新
+
+- 新安装包：`TiaoTiao-0.1.1-debug.apk`，versionCode 2。
+- 桌面、应用标题和无障碍服务名称统一为 `TiaoTiao`，其余界面语言保持中文。
+- 已重新通过核心测试、Lint（无 Error/Fatal）和 APK 构建；名称更新不改变跳过与确认流程。
+- 下方端到端记录与截图为 0.1.0 验证留档，显示当时的旧名称。
+
 ## 交付
 
 - `TiaoTiao-0.1.0-debug.apk`：可安装调试版；包名 `com.haibo.tiaotiao`，versionCode 1，最低 Android API 26，target API 36。

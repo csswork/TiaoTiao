@@ -102,7 +102,7 @@ class MainActivity : ComponentActivity() {
 
         Scaffold(containerColor = Cream, snackbarHost = { SnackbarHost(snackbar) },
             topBar = { TopAppBar(title = { Column {
-                Text("跳跳", fontWeight = FontWeight.Bold)
+                Text("TiaoTiao", fontWeight = FontWeight.Bold)
                 Text("让等待少一点", style = MaterialTheme.typography.labelMedium, color = Pine)
             } }, colors = TopAppBarDefaults.topAppBarColors(containerColor = Cream)) },
             bottomBar = { NavigationBar(containerColor = Color.White) {
@@ -165,7 +165,7 @@ class MainActivity : ComponentActivity() {
                                     withContext(Dispatchers.Main) {
                                         val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.files", file)
                                         val intent = Intent(Intent.ACTION_SEND).setType("application/json").putExtra(Intent.EXTRA_STREAM, uri)
-                                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).apply { clipData = ClipData.newRawUri("跳跳规则", uri) }
+                                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).apply { clipData = ClipData.newRawUri("TiaoTiao 规则", uri) }
                                         startActivity(Intent.createChooser(intent, "分享已验证规则"))
                                     }
                                     "已准备分享文件"
@@ -185,7 +185,7 @@ class MainActivity : ComponentActivity() {
                         item { Text("记录保留最近 150 条。发起点击表示系统接受动作，实际试跳结果由你确认。", style = MaterialTheme.typography.bodyMedium) }
                         if (logs.isEmpty()) item { EmptyState("暂无记录", "服务开始处理后，会在这里显示结果。") }
                         items(logs) { entry -> SectionCard(entry.message) {
-                            Text(entry.packageName.ifBlank { "跳跳服务" }, style = MaterialTheme.typography.bodySmall)
+                            Text(entry.packageName.ifBlank { "TiaoTiao 服务" }, style = MaterialTheme.typography.bodySmall)
                             Text(time(entry.at), style = MaterialTheme.typography.labelSmall, color = Pine)
                         } }
                     }
@@ -193,12 +193,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        if (disclosure) AlertDialog(onDismissRequest = { disclosure = false }, title = { Text("开启跳跳无障碍服务") }, text = {
-            Text("跳跳会在你选择的应用进入前台后，短时读取界面结构和跳过按钮特征，并执行已经验证的点击方案。\n\n新方案需要试跳后由你确认。你可随时暂停或关闭服务。Jev 云端分析需要在设置中另行开启。")
+        if (disclosure) AlertDialog(onDismissRequest = { disclosure = false }, title = { Text("开启 TiaoTiao 无障碍服务") }, text = {
+            Text("TiaoTiao 会在你选择的应用进入前台后，短时读取界面结构和跳过按钮特征，并执行已经验证的点击方案。\n\n新方案需要试跳后由你确认。你可随时暂停或关闭服务。Jev 云端分析需要在设置中另行开启。")
         }, confirmButton = { TextButton(onClick = { disclosure = false; startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) { Text("了解，前往设置") } },
             dismissButton = { TextButton(onClick = { disclosure = false }) { Text("取消") } })
         if (cloudDisclosure) AlertDialog(onDismissRequest = { cloudDisclosure = false }, title = { Text("允许 Jev 分析未知界面") }, text = {
-            Text("对你选中的应用，跳跳会把筛选后的控件信息（包名、版本、控件 ID、位置及跳过/广告等允许词）发送到 TypeSafe 官方 API。第一版不发送截图或输入框内容。\n\n仅在本地没有匹配规则时请求，已验证规则可离线使用。你可随时关闭。")
+            Text("对你选中的应用，TiaoTiao 会把筛选后的控件信息（包名、版本、控件 ID、位置及跳过/广告等允许词）发送到 TypeSafe 官方 API。第一版不发送截图或输入框内容。\n\n仅在本地没有匹配规则时请求，已验证规则可离线使用。你可随时关闭。")
         }, confirmButton = { TextButton(onClick = { repository.updateSettings { it.copy(cloudEnabled = true) }; cloudDisclosure = false }) { Text("允许") } },
             dismissButton = { TextButton(onClick = { cloudDisclosure = false }) { Text("取消") } })
         jsonRule?.let { rule -> AlertDialog(onDismissRequest = { jsonRule = null }, title = { Text("规则 JSON") }, text = {
@@ -298,7 +298,7 @@ class MainActivity : ComponentActivity() {
                 Text("第一版使用节点识别，不采集截图。图片分析会在后续单独验证后加入。", style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = { task { repository.clearSamples(); "已清空本地样本" } }, enabled = !busy) { Text("清空样本") }
             } }
-            item { Text("跳跳 0.1.0 · Android 8.0 及以上\n服务被系统关闭后，需在系统设置重新开启。", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
+            item { Text("TiaoTiao 0.1.1 · Android 8.0 及以上\n服务被系统关闭后，需在系统设置重新开启。", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
         }
     }
 }
