@@ -13,6 +13,7 @@ import java.util.UUID
     val evidence: List<AutoEvidence> = emptyList(), val lastResult: String = "等待自动尝试",
     val homeScene: String = "",
     val awaitingLocalReview: Boolean = false,
+    val automaticFailures: Int = 0,
 ) {
     fun behavior() = digest("$packageName|$versionCode|$scene|$target|$targetHash|$label")
     fun successfulSessions() = evidence.filter { it.behavior == behavior() && it.earlyClick && it.normalHome && it.sameApplication }.map { it.session }.distinct().size
@@ -36,6 +37,7 @@ object VisualPolicy {
         require(rule.scene.matches(Regex("[a-f0-9]{64}")) && rule.target.valid())
         require(rule.targetHash.matches(Regex("[01]{64}")) && rule.label in setOf("skip", "close_ad"))
         require(rule.source.length <= 120 && rule.evidence.size <= 20)
+        require(rule.automaticFailures in 0..100)
         require(rule.homeScene.isEmpty() || rule.homeScene.matches(Regex("[a-f0-9]{64}")))
         require(rule.target.right - rule.target.left <= .4f && rule.target.bottom - rule.target.top <= .18f)
         if (rule.state == VisualRuleState.ACTIVE) require(rule.active())
@@ -51,7 +53,7 @@ object VisualPolicy {
         return labelled || (signals.advertisement && patch && informative)
     }
     fun record(rule: VisualRule, session: String, early: Boolean, home: Boolean, sameApp: Boolean, now: Long, timingBasis: String = "countdown"): VisualRule {
-        if (!home || !sameApp) return rule.copy(state = VisualRuleState.PAUSED, lastResult = "自动检查未通过，已暂停")
+        if (!home || !sameApp) return rule.copy(state = VisualRuleState.PAUSED, automaticFailures=rule.automaticFailures+1, lastResult = "自动检查未通过，等待重新识别")
         require(timingBasis in setOf("countdown","observed_baseline","unknown"))
         val proof = AutoEvidence(session, rule.behavior(), now, early, home, sameApp,timingBasis)
         val next = rule.copy(evidence = (rule.evidence.filterNot { it.session == session } + proof).takeLast(20))

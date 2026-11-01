@@ -8,6 +8,7 @@ import java.util.UUID
 
 /** The automatic experiment is explicitly scoped to Damai and this app's synthetic visual demo. */
 class SmartPilot(private val service: SkipAccessibilityService,
+    private val currentWindow: () -> ScreenSnapshot?,
     private val current: () -> ScreenSnapshot?, private val open: (Long,String) -> Boolean,
     private val tap: suspend (Long,ScreenSnapshot,Area) -> Boolean) {
     private val app get() = service.application as TiaoApplication
@@ -50,7 +51,7 @@ class SmartPilot(private val service: SkipAccessibilityService,
         if (attempts || SystemClock.elapsedRealtime()<nextCapture || !open(gen,screen.packageName)) return
         nextCapture=SystemClock.elapsedRealtime()+550
         val observingBaseline = adScene!=null && !attempts && !baselineDone && screen.fingerprint()!=adScene
-        if (!screen.complete || (!demo(screen) && screen.nodes.size>40 && !observingBaseline)) { stage="skip-large-or-incomplete-${screen.nodes.size}";return }
+        if ((!screen.complete && !observingBaseline) || (!demo(screen) && screen.nodes.size>40 && !observingBaseline)) { stage="skip-large-or-incomplete-${screen.nodes.size}";return }
         val cloudReady = app.visualLearner.allowed(screen.packageName)
         val hasActive = repository.visualRules.value.any { it.packageName==screen.packageName && it.versionCode==screen.versionCode && it.scene==screen.fingerprint() && it.active() }
         if (!demo(screen) && !cloudReady && !hasActive) {
@@ -69,7 +70,7 @@ class SmartPilot(private val service: SkipAccessibilityService,
             captures++
             if (!open(gen,screen.packageName)) return
             val fresh = current() ?: return
-            if (fresh.packageName!=screen.packageName || fresh.windowId!=screen.windowId || fresh.fingerprint()!=screen.fingerprint()) {stage="stale-screen";return}
+            if (fresh.packageName!=screen.packageName || fresh.windowId!=screen.windowId || (!observingBaseline && fresh.fingerprint()!=screen.fingerprint())) {stage="stale-screen";return}
             if (observingBaseline && frame.signals.home && frame.signals.skips.isEmpty()) {
                 val scene=adScene ?: return
                 repository.recordVisualBaseline(scene,frame.at-adSeenAt);baselineDone=true
@@ -117,7 +118,7 @@ class SmartPilot(private val service: SkipAccessibilityService,
                 try {
                     for (index in 0 until 5) {
                         delay(if (index==0) 450 else 550)
-                        val snapshot=current() ?: break
+                        val snapshot=currentWindow() ?: continue
                         if (snapshot.packageName!=screen.packageName) break
                         val observed=try { capture.capture(snapshot) } catch (c: CancellationException) { throw c }
                             catch (_: Exception) { continue }
@@ -136,7 +137,9 @@ class SmartPilot(private val service: SkipAccessibilityService,
                     }
                     val after1=afterFrames[0];val after2=afterFrames[1]
                     val remaining=frame.signals.countdown?.times(1000L) ?: (baseline-(frame.at-adSeenAt))
-                    val early=remaining>=2000 && after2.at-frame.at<remaining-300
+                    // The first confirmed home frame establishes transition time; the second only
+                    // corroborates it and may arrive later because OCR work takes time.
+                    val early=remaining>=2000 && after1.at-frame.at<remaining-300
                     val basis=if (frame.signals.countdown!=null) "countdown" else if (baseline>0) "observed_baseline" else "unknown"
                     if (chosen.source=="bundled-ocr-demo") {
                         repository.putVisual(VisualPolicy.record(chosen,session,early,true,true,System.currentTimeMillis(),basis))
@@ -146,12 +149,13 @@ class SmartPilot(private val service: SkipAccessibilityService,
                         repository.reportDetection(screen.packageName,"智能规则本地复用及结果检查通过，未请求云端模型")
                     } else if (cloudReady) {
                         repository.reportDetection(screen.packageName,"已观察到连续页面变化，AI 正在自动复核结果")
-                        val homeScene=after2.screen.fingerprint().takeUnless { it==screen.fingerprint() }.orEmpty()
+                        val homeScene=after2.screen.fingerprint().takeIf { after2.screen.complete && it!=screen.fingerprint() }.orEmpty()
                         app.visualLearner.verify(chosen,session,listOf(frame.jpeg,after1.jpeg,after2.jpeg),early,true,homeScene,basis)
                     }
                 } finally { afterFrames.forEach { it.close() } }
             } else if (rule==null && !demo(screen) && !frame.signals.home && queued<2 && SystemClock.elapsedRealtime()>=nextLearnAt) {
-                if (repository.visualRules.value.any { it.packageName==screen.packageName && it.scene==screen.fingerprint() && it.state==VisualRuleState.PAUSED }) return
+                if (repository.visualRules.value.any { it.packageName==screen.packageName && it.scene==screen.fingerprint() && it.state==VisualRuleState.PAUSED &&
+                    (it.lastResult.startsWith("用户") || it.automaticFailures>=2) }) return
                 if (app.visualLearner.enqueue(frame)) { queued++;nextLearnAt=SystemClock.elapsedRealtime()+1800 }
             }
         }

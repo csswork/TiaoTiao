@@ -41,20 +41,32 @@ class VisualFrame(val screen: ScreenSnapshot, val bitmap: Bitmap, val signals: V
 class VisualCapture(private val service: AccessibilityService) {
     private val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
     private val navigation = setOf("首页", "我的", "票夹", "演出", "分类", "搜索", "推荐", "关注", "消息")
-    suspend fun capture(screen: ScreenSnapshot): VisualFrame = withContext(Dispatchers.Default) {
+    suspend fun capture(screen: ScreenSnapshot): VisualFrame {
+        var owned: VisualFrame? = null
+        try {
+            withContext(Dispatchers.Default) { owned=captureWorker(screen) }
+            return requireNotNull(owned)
+        } catch (t: Throwable) { owned?.close();throw t }
+    }
+    private suspend fun captureWorker(screen: ScreenSnapshot): VisualFrame {
         check(Build.VERSION.SDK_INT >= 30) { "视觉学习需要 Android 11 及以上" }
         val bitmap = screenshot(screen.windowId)
         val capturedAt = SystemClock.elapsedRealtime()
-        try {
+        var ocrBitmap: Bitmap? = null
+        return try {
             check(kotlin.math.abs(bitmap.width.toFloat()/bitmap.height-screen.width.toFloat()/screen.height)<.015f) { "窗口比例变化，暂不使用截图坐标" }
-            val result = suspendCancellableCoroutine<com.google.mlkit.vision.text.Text> { c ->
-                recognizer.process(InputImage.fromBitmap(bitmap,0))
-                    .addOnSuccessListener { if (c.isActive) c.resume(it) }
-                    .addOnFailureListener { if (c.isActive) c.resumeWithException(it) }
+            val ocrWidth=minOf(720,bitmap.width)
+            val imageBitmap=Bitmap.createScaledBitmap(bitmap,ocrWidth,(ocrWidth.toFloat()*bitmap.height/bitmap.width).toInt(),true)
+            ocrBitmap=imageBitmap
+            val result = kotlin.coroutines.suspendCoroutine<com.google.mlkit.vision.text.Text> { c ->
+                recognizer.process(InputImage.fromBitmap(imageBitmap,0))
+                    .addOnSuccessListener { c.resume(it) }
+                    .addOnFailureListener { c.resumeWithException(it) }
             }
+            currentCoroutineContext().ensureActive()
             val lines = result.textBlocks.flatMap { it.lines }
-            fun area(r: Rect) = Area((r.left.toFloat()/bitmap.width).coerceIn(0f,1f),(r.top.toFloat()/bitmap.height).coerceIn(0f,1f),
-                (r.right.toFloat()/bitmap.width).coerceIn(0f,1f),(r.bottom.toFloat()/bitmap.height).coerceIn(0f,1f))
+            fun area(r: Rect) = Area((r.left.toFloat()/imageBitmap.width).coerceIn(0f,1f),(r.top.toFloat()/imageBitmap.height).coerceIn(0f,1f),
+                (r.right.toFloat()/imageBitmap.width).coerceIn(0f,1f),(r.bottom.toFloat()/imageBitmap.height).coerceIn(0f,1f))
             fun isSkipControl(text: String): Boolean {
                 val t=text.replace(Regex("\\s"),"")
                 if (listOf("登录","引导","教程","视频","支付").any { it in t }) return false
@@ -72,7 +84,7 @@ class VisualCapture(private val service: AccessibilityService) {
             }.maxOrNull()
             val home = skips.isEmpty() && lines.count { it.text.trim() in navigation } >= 2
             // Images sent to the gateway contain no arbitrary OCR text or input values.
-            val masked = bitmap.copy(Bitmap.Config.ARGB_8888,true)
+            val masked = imageBitmap.copy(Bitmap.Config.ARGB_8888,true)
             val canvas = Canvas(masked); val paint = Paint().apply { color = Color.rgb(170,170,170) }
             fun possibleControl(line: com.google.mlkit.vision.text.Text.Line): Boolean {
                 val rect=line.boundingBox ?: return false
@@ -85,11 +97,11 @@ class VisualCapture(private val service: AccessibilityService) {
                 it in skipLines || it.text.trim().matches(Regex("\\d{1,2}\\s*(?:秒|s|S)")) }.forEach {
                 it.boundingBox?.let { r -> canvas.drawRect(r,paint) }
             }
-            val small = Bitmap.createScaledBitmap(masked,720,(720f*masked.height/masked.width).toInt(),true)
-            val jpeg = ByteArrayOutputStream().use { small.compress(Bitmap.CompressFormat.JPEG,75,it); it.toByteArray() }
-            if (small !== masked) small.recycle(); masked.recycle()
+            val jpeg = ByteArrayOutputStream().use { masked.compress(Bitmap.CompressFormat.JPEG,75,it); it.toByteArray() }
+            masked.recycle()
             VisualFrame(screen,bitmap,VisualSignals(ad,inlineTimer ?: nearbyTimer,skips,home),jpeg,capturedAt)
         } catch (t: Throwable) { bitmap.recycle(); throw t }
+        finally { ocrBitmap?.takeIf { it!==bitmap }?.recycle() }
     }
     private suspend fun screenshot(window: Int): Bitmap = suspendCancellableCoroutine { c ->
         val callback = object : AccessibilityService.TakeScreenshotCallback {

@@ -11,12 +11,12 @@ import java.util.concurrent.TimeUnit
 
 @Serializable data class VisualDecision(val advertisement: Boolean, val confidence: Double, val label: String = "none",
     val left: Float = 0f, val top: Float = 0f, val right: Float = 0f, val bottom: Float = 0f) {
-    fun target(): Area? = Area(left,top,right,bottom).takeIf { advertisement && confidence.isFinite() && confidence in .95..1.0 &&
+    fun target(): Area? = Area(left,top,right,bottom).takeIf { advertisement && confidence.isFinite() && confidence in .9..1.0 &&
         label in setOf("skip","close_ad") && it.valid() && it.right-it.left <= .4 && it.bottom-it.top <= .18 }
 }
 @Serializable data class VisualVerdict(val normalHome: Boolean, val advertisementGone: Boolean, val landingPage: Boolean,
     val systemPrompt: Boolean, val confidence: Double) {
-    fun accepted() = normalHome && advertisementGone && !landingPage && !systemPrompt && confidence.isFinite() && confidence in .95..1.0
+    fun accepted() = normalHome && advertisementGone && !landingPage && !systemPrompt && confidence.isFinite() && confidence in .9..1.0
 }
 
 class VisualClient(private val client: OkHttpClient = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
@@ -41,7 +41,7 @@ class VisualClient(private val client: OkHttpClient = OkHttpClient.Builder().fol
                         val numbers=if (verification) listOf("confidence") else listOf("confidence","left","top","right","bottom")
                         putJsonObject("properties") {
                             booleans.forEach { name -> putJsonObject(name) { put("type","boolean") } }
-                            numbers.forEach { name -> putJsonObject(name) { put("type","number") } }
+                            numbers.forEach { name -> putJsonObject(name) { put("type","number");put("minimum",0);put("maximum",1) } }
                             if (!verification) putJsonObject("label") { put("type","string");putJsonArray("enum") { listOf("skip","close_ad","none").forEach { add(it) } } }
                         }
                         putJsonArray("required") { (booleans+numbers+if (verification) emptyList() else listOf("label")).forEach { add(it) } }

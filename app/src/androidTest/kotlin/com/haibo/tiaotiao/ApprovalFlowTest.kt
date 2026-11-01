@@ -35,6 +35,7 @@ class ApprovalFlowTest {
         shell("settings put secure enabled_accessibility_services ${context.packageName}/com.haibo.tiaotiao.service.SkipAccessibilityService")
         shell("settings put secure accessibility_enabled 1")
         waitUntil { SkipAccessibilityService.instance != null && repository.connected.value }
+        repository.clearLogs() // The bounded history from previous runs must not change counter assertions.
         repository.rules.value.filter { it.packageName == context.packageName }.forEach { repository.remove(it.id) }
         repository.updateSettings { it.copy(enabled = true, cloudEnabled = false) }
         openDemo()

@@ -49,7 +49,13 @@ class SkipAccessibilityService : AccessibilityService() {
     private fun visualDemo(screen: ScreenSnapshot) = screen.packageName == packageName &&
         screen.nodes.any { it.resourceId.endsWith(":id/smart_demo_ad") }
     private fun pilot() = smartPilot ?: SmartPilot(this,
-        current = { observe()?.use { it.screen } },
+        currentWindow = { visualWindow() },
+        current = {
+            // A just-closed splash window can remain in the accessibility cache; querying its
+            // root on the main thread otherwise waits for a framework timeout before seeing home.
+            if (android.os.Build.VERSION.SDK_INT>=33) clearCache()
+            observe()?.use { it.screen }
+        },
         open = { generation, pkg -> repository.settings.value.enabled && gate.generation == generation && gate.isOpen(pkg,SystemClock.elapsedRealtime()) },
         tap = { generation, screen, area -> smartTap(generation,screen,area) }).also { smartPilot = it }
     private val reportedReasons = mutableSetOf<String>()
@@ -148,7 +154,8 @@ class SkipAccessibilityService : AccessibilityService() {
         }
         val availableWindows = windows
         val applicationWindow = selectedWindow(availableWindows)
-        val root = applicationWindow?.root ?: rootInActiveWindow ?: run {
+        val root = (if (android.os.Build.VERSION.SDK_INT>=33) applicationWindow?.getRoot(0) ?: getRootInActiveWindow(0)
+            else applicationWindow?.root ?: rootInActiveWindow) ?: run {
             unreadable("no-root", "系统尚未提供可读取的应用界面，正在短时重试（未调用 Jev）")
             return null
         }
@@ -175,9 +182,24 @@ class SkipAccessibilityService : AccessibilityService() {
             return null
         }
         val metrics = resources.displayMetrics
-        return ScreenReader.read(root, version, metrics.widthPixels, metrics.heightPixels).also {
+        val limit=if (pkg=="cn.damai" && repository.settings.value.smartDamai) 40 else 300
+        return ScreenReader.read(root, version, metrics.widthPixels, metrics.heightPixels,limit).also {
             lastReadState = "已读取 ${it.screen.nodes.size} 个节点，界面完整=${it.screen.complete}"
         }
+    }
+    private fun visualWindow(): ScreenSnapshot? {
+        if (!getSystemService(PowerManager::class.java).isInteractive || getSystemService(KeyguardManager::class.java).isKeyguardLocked) return null
+        if (android.os.Build.VERSION.SDK_INT>=33) clearCache()
+        val window=selectedWindow(windows) ?: return null
+        val root=(if (android.os.Build.VERSION.SDK_INT>=33) window.getRoot(0) else window.root) ?: return null
+        val pkg=root.packageName?.toString().orEmpty()
+        @Suppress("DEPRECATION") root.recycle()
+        val version=runCatching { @Suppress("DEPRECATION") packageManager.getPackageInfo(pkg,0).let {
+            if (android.os.Build.VERSION.SDK_INT>=28) it.longVersionCode else @Suppress("DEPRECATION") it.versionCode.toLong()
+        } }.getOrNull() ?: return null
+        val m=resources.displayMetrics
+        // Metadata only: visual verification must not wait for every home-page node/provider.
+        return ScreenSnapshot(pkg,version,m.widthPixels,m.heightPixels,emptyList(),System.currentTimeMillis(),window.id,complete=false)
     }
     private fun isDemo(screen: ScreenSnapshot) = screen.packageName == packageName && screen.nodes.any { it.resourceId.endsWith(":id/demo_skip") }
     private fun eligible(screen: ScreenSnapshot) = (screen.packageName in repository.settings.value.packages && screen.packageName != packageName) || isDemo(screen) || visualDemo(screen)

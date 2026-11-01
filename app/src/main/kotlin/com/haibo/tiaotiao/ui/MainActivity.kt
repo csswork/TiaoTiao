@@ -242,8 +242,8 @@ class MainActivity : ComponentActivity() {
                             Text(r.lastResult)
                             Text("自动检查 ${r.successfulSessions()}/2 · ${r.source}",style=MaterialTheme.typography.bodySmall)
                             Row {
-                                TextButton(onClick={ repository.putVisual(r.copy(state=VisualRuleState.PAUSED,lastResult="用户反馈点错，已停用")) }) { Text("点错了／停用") }
-                                if (r.state==VisualRuleState.PAUSED) TextButton(onClick={ repository.putVisual(r.copy(state=VisualRuleState.CANDIDATE,evidence=emptyList(),lastResult="等待重新自动检查")) }) { Text("重新学习") }
+                                TextButton(onClick={ visualRules.filter { it.packageName==r.packageName && it.scene==r.scene }.forEach { repository.putVisual(it.copy(state=VisualRuleState.PAUSED,lastResult="用户反馈点错，已停用")) } }) { Text("点错了／停用") }
+                                if (r.state==VisualRuleState.PAUSED) TextButton(onClick={ visualRules.filter { it.packageName==r.packageName && it.scene==r.scene }.forEach { repository.putVisual(it.copy(state=VisualRuleState.CANDIDATE,evidence=emptyList(),awaitingLocalReview=true,lastResult="等待 AI 重新识别")) } }) { Text("重新学习") }
                                 TextButton(onClick={ repository.removeVisual(r.id) }) { Text("删除") }
                             }
                         } }

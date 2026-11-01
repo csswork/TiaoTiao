@@ -10,19 +10,20 @@ class Observation(val screen: ScreenSnapshot, val handles: Map<String, Accessibi
 
 object ScreenReader {
     /** Traversal is bounded, editable/password subtrees are omitted, retained labels use an allowlist. */
-    fun read(root: AccessibilityNodeInfo, versionCode: Long, width: Int, height: Int): Observation {
+    fun read(root: AccessibilityNodeInfo, versionCode: Long, width: Int, height: Int, nodeLimit: Int = 300): Observation {
         val nodes = mutableListOf<ScreenNode>()
         val handles = linkedMapOf<String, AccessibilityNodeInfo>()
         var complete = true
         fun visit(node: AccessibilityNodeInfo, path: String, depth: Int): List<String> {
             handles[path] = node
-            if (depth > 20 || handles.size >= 300 || node.childCount > 100) { complete = false; return emptyList() }
+            if (depth > 20 || handles.size >= nodeLimit || node.childCount > 100) { complete = false; return emptyList() }
             if (!node.isVisibleToUser || node.isPassword || node.isEditable) return emptyList()
             val labels = listOf(node.text?.toString().orEmpty(), node.contentDescription?.toString().orEmpty())
                 .map(SignalText::sanitize).filter(String::isNotBlank).toMutableList()
             for (index in 0 until node.childCount.coerceAtMost(100)) {
-                if (handles.size >= 300) { complete = false; break }
-                node.getChild(index)?.let { labels += visit(it, "$path.$index", depth + 1) }
+                if (handles.size >= nodeLimit) { complete = false; break }
+                val child=if (nodeLimit<300 && android.os.Build.VERSION.SDK_INT>=33) node.getChild(index,0) else node.getChild(index)
+                child?.let { labels += visit(it, "$path.$index", depth + 1) }
             }
             val rect = Rect().also(node::getBoundsInScreen)
             val area = Area((rect.left.toFloat()/width).coerceIn(0f,1f), (rect.top.toFloat()/height).coerceIn(0f,1f),

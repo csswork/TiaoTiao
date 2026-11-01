@@ -84,9 +84,13 @@ class VisualLearner(context: Context, private val repository: AppRepository) {
                     val hash = frame.use { it.patch(area) }
                     val rule = VisualRule(packageName=p.screen.packageName,versionCode=p.screen.versionCode,scene=p.screen.fingerprint(),
                         target=area,targetHash=hash,label=decision.label,source="vercel:${p.model}",createdAt=System.currentTimeMillis())
+                    val sceneRules=repository.visualRules.value.filter { it.packageName==rule.packageName && it.scene==rule.scene }
+                    if (sceneRules.any { it.state==VisualRuleState.PAUSED && it.lastResult.startsWith("用户") }) return@withPermit
+                    val retry=sceneRules.firstOrNull { it.state==VisualRuleState.PAUSED && it.automaticFailures<2 && it.target.near(rule.target) }
+                    if (retry!=null) repository.putVisual(rule.copy(id=retry.id,automaticFailures=retry.automaticFailures,lastResult="AI 已重新识别，等待自动检查"))
                     val imported=repository.visualRules.value.firstOrNull { it.awaitingLocalReview && it.packageName==rule.packageName && it.scene==rule.scene }
                     if (imported!=null) repository.putVisual(rule.copy(id=imported.id))
-                    if (imported==null && repository.visualRules.value.none { it.behavior()==rule.behavior() ||
+                    if (retry==null && imported==null && repository.visualRules.value.none { it.behavior()==rule.behavior() ||
                         (it.packageName==rule.packageName && it.scene==rule.scene && it.target.near(rule.target)) }) repository.putVisual(rule)
                     repository.reportDetection(p.screen.packageName,"视觉方案已缓存（${elapsed} ms）；当前或下次匹配时自动尝试，无需人工确认")
                 }
@@ -119,7 +123,7 @@ class VisualLearner(context: Context, private val repository: AppRepository) {
             try {
                 if (!allowed(rule.packageName)) return@launch
                 val verdict = client.verify(images,repository.vault.get("jevKey"),repository.settings.value.visionModel)
-                repository.log(rule.packageName,"AI 结果复核：首页=${verdict.normalHome}，广告消失=${verdict.advertisementGone}，详情页=${verdict.landingPage}，系统提示=${verdict.systemPrompt}，时序=$early")
+                repository.log(rule.packageName,"AI 结果复核：首页=${verdict.normalHome}，广告消失=${verdict.advertisementGone}，详情页=${verdict.landingPage}，系统提示=${verdict.systemPrompt}，置信=${verdict.confidence}，时序=$early")
                 if (!allowed(rule.packageName)) return@launch
                 val current = repository.visualRules.value.find { it.id==rule.id && it.behavior()==rule.behavior() } ?: return@launch
                 if (current.state==VisualRuleState.PAUSED) return@launch
