@@ -31,6 +31,7 @@ class ApprovalFlowTest {
         }
         openDemo() // Start the installed app before asking Android to bind its accessibility service.
         shell("settings put secure enabled_accessibility_services ''")
+        waitUntil { SkipAccessibilityService.instance == null && !repository.connected.value }
         shell("settings put secure enabled_accessibility_services ${context.packageName}/com.haibo.tiaotiao.service.SkipAccessibilityService")
         shell("settings put secure accessibility_enabled 1")
         waitUntil { SkipAccessibilityService.instance != null && repository.connected.value }
@@ -60,7 +61,7 @@ class ApprovalFlowTest {
             waitUntil { automation.windows.none { it.root?.packageName?.toString() == context.packageName } }
             Thread.sleep(400)
             instrumentation.runOnMainSync {
-                context.startActivity(Intent(context, DemoActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                context.startActivity(Intent(context, DemoActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
             }
             waitUntil { repository.logs.value.count { it.message == "已按验证规则发起跳过点击" } == autoBefore + 2 + index }
             waitUntil { hasText("已进入演示首页") }
