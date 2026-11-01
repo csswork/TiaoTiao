@@ -12,6 +12,7 @@ import java.util.UUID
     val source: String, val createdAt: Long, val state: VisualRuleState = VisualRuleState.CANDIDATE,
     val evidence: List<AutoEvidence> = emptyList(), val lastResult: String = "等待自动尝试",
     val homeScene: String = "",
+    val homeHash: String = "",
     val awaitingLocalReview: Boolean = false,
     val automaticFailures: Int = 0,
 ) {
@@ -24,6 +25,18 @@ import java.util.UUID
 data class VisualSignals(val advertisement: Boolean, val countdown: Int?, val skips: List<Area>, val home: Boolean)
 
 object VisualPolicy {
+    private fun binaryHash(value: String) = value.matches(Regex("[01]{64}"))
+    private fun distance(a: String, b: String) = a.zip(b).count { it.first != it.second }
+    /** Only an informative, stable home patch distinct from the ad can become a template.
+     * The caller may persist it only after an independent AI verdict accepts the home frames. */
+    fun homeTemplate(before: String, first: String, second: String): String {
+        if (!listOf(before,first,second).all(::binaryHash) || first.count { it=='1' } !in 4..60 ||
+            second.count { it=='1' } !in 4..60) return ""
+        return second.takeIf { distance(first,second)<=3 && distance(before,first)>=10 && distance(before,second)>=10 }.orEmpty()
+    }
+    fun matchesHome(rule: VisualRule, before: String, first: String, second: String): Boolean =
+        rule.active() && binaryHash(rule.homeHash) && homeTemplate(before,first,second).isNotEmpty() &&
+            distance(rule.homeHash,first)<=3 && distance(rule.homeHash,second)<=3
     fun clickableTarget(screen: ScreenSnapshot, area: Area): ScreenNode? {
         val x=(area.left+area.right)/2;val y=(area.top+area.bottom)/2
         return screen.candidates().filter { n ->
@@ -39,6 +52,7 @@ object VisualPolicy {
         require(rule.source.length <= 120 && rule.evidence.size <= 20)
         require(rule.automaticFailures in 0..100)
         require(rule.homeScene.isEmpty() || rule.homeScene.matches(Regex("[a-f0-9]{64}")))
+        require(rule.homeHash.isEmpty() || binaryHash(rule.homeHash))
         require(rule.target.right - rule.target.left <= .4f && rule.target.bottom - rule.target.top <= .18f)
         if (rule.state == VisualRuleState.ACTIVE) require(rule.active())
     }
@@ -53,7 +67,7 @@ object VisualPolicy {
         return labelled || (signals.advertisement && patch && informative)
     }
     fun record(rule: VisualRule, session: String, early: Boolean, home: Boolean, sameApp: Boolean, now: Long, timingBasis: String = "countdown"): VisualRule {
-        if (!home || !sameApp) return rule.copy(state = VisualRuleState.PAUSED, automaticFailures=rule.automaticFailures+1, lastResult = "自动检查未通过，等待重新识别")
+        if (!home || !sameApp) return rule.copy(state = VisualRuleState.PAUSED, automaticFailures=(rule.automaticFailures+1).coerceAtMost(100), lastResult = "自动检查未通过，等待重新识别")
         require(timingBasis in setOf("countdown","observed_baseline","unknown"))
         val proof = AutoEvidence(session, rule.behavior(), now, early, home, sameApp,timingBasis)
         val next = rule.copy(evidence = (rule.evidence.filterNot { it.session == session } + proof).takeLast(20))
@@ -69,6 +83,6 @@ object VisualPolicy {
         return bundle
     }
     fun import(text: String): List<VisualRule> = decode(text).rules.map {
-        it.copy(state = VisualRuleState.CANDIDATE, evidence = emptyList(), awaitingLocalReview = true, lastResult = "已导入，等待本机 AI 重新识别")
+        it.copy(state = VisualRuleState.CANDIDATE, evidence = emptyList(), homeScene = "", homeHash = "", awaitingLocalReview = true, lastResult = "已导入，等待本机 AI 重新识别")
     }
 }

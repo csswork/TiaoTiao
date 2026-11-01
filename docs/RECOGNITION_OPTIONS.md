@@ -5,7 +5,7 @@
 | 项目 | 适合的部分 | 本项目建议 |
 | --- | --- | --- |
 | [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) / [官方 Android 部署](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/inference_deployment/cross_platform/android_deployment.en.md) | 中文文本检测与识别、端侧部署，Apache-2.0 | 首选 OCR 对比候选，以同一批大麦画面测按钮召回、位置误差、冷启动与 P95 延迟 |
-| [RapidOCR Android Kotlin/Compose](https://github.com/RapidAI/RapidOcrAndroidOnnxCompose) | ONNX Runtime + OpenCV 的安卓 OCR 示例，Apache-2.0 | 评估嵌入成本、ABI、模型格式与耗电，不能把示例当作现成广告分类器 |
+| [RapidOCR Android Kotlin/Compose](https://github.com/RapidAI/RapidOcrAndroidOnnxCompose) | ONNX Runtime + OpenCV 的安卓 OCR 示例，Apache-2.0 | README 仍列出 2022 年依赖版本，适合作为移植参考；需评估 ABI、模型格式、耗电和依赖升级，不能把示例当作现成广告分类器 |
 | [OpenCV](https://github.com/opencv/opencv) | 已知按钮的模板匹配、多尺度定位、图像预处理 | 辅助无文字图标定位；模板只对特定外观有效，不能独立判断广告语义 |
 | [GKD](https://github.com/gkd-kit/gkd) | 无障碍、高级选择器、规则订阅，GPL-3.0 | 参考稳定目标描述和规则维护，避免重造完整选择器；不是视觉广告识别模型。复用代码与订阅前分别核对其许可 |
 | [Open-AutoGLM](https://github.com/zai-org/Open-AutoGLM) | 手机 GUI 理解与操作模型/框架 | 作为后台图像理解候选，不直接扩大本应用的动作范围，不把整套 ADB 控制框架嵌入 APK |

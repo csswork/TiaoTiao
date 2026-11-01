@@ -118,7 +118,7 @@ class VisualLearner(context: Context, private val repository: AppRepository) {
         folder.listFiles().orEmpty().forEach { it.delete() }
         finished.edit().clear().apply()
     }
-    fun verify(rule: VisualRule, session: String, images: List<ByteArray>, early: Boolean, sameApp: Boolean, homeScene: String, basis: String) {
+    fun verify(rule: VisualRule, session: String, images: List<ByteArray>, early: Boolean, sameApp: Boolean, homeScene: String, homeHash: String, basis: String) {
         scope.launch {
             try {
                 if (!allowed(rule.packageName)) return@launch
@@ -127,7 +127,8 @@ class VisualLearner(context: Context, private val repository: AppRepository) {
                 if (!allowed(rule.packageName)) return@launch
                 val current = repository.visualRules.value.find { it.id==rule.id && it.behavior()==rule.behavior() } ?: return@launch
                 if (current.state==VisualRuleState.PAUSED) return@launch
-                val updated = VisualPolicy.record(current,session,early,verdict.accepted(),sameApp,System.currentTimeMillis(),basis).copy(homeScene=homeScene)
+                val updated = VisualPolicy.record(current,session,early,verdict.accepted(),sameApp,System.currentTimeMillis(),basis)
+                    .copy(homeScene=homeScene,homeHash=if (early && verdict.accepted() && sameApp && homeHash.isNotEmpty()) homeHash else current.homeHash)
                 repository.putVisual(updated)
                 repository.reportDetection(rule.packageName,if (updated.active()) "AI 与时序检查通过，智能规则已自动启用" else updated.lastResult)
             } catch (_: Exception) { repository.reportDetection(rule.packageName,"自动结果检查未完成，未晋升为已验证规则") }

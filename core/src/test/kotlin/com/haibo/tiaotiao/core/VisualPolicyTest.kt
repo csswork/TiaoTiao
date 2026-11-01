@@ -46,9 +46,23 @@ class VisualPolicyTest {
     @Test fun `failed verification and changed behavior stop automatic reuse`() {
         val r = VisualPolicy.record(rule, "one", true, false, true, 1)
         assertEquals(VisualRuleState.PAUSED, r.state)
+        assertEquals(1, r.automaticFailures)
         assertFalse(VisualPolicy.canAttempt(r, screen, ad, r.targetHash))
         val active = VisualPolicy.record(VisualPolicy.record(rule, "one", true, true, true, 1), "two", true, true, true, 2)
         assertFalse(active.copy(target = Area(.7f,.04f,.8f,.09f)).active())
+    }
+    @Test fun `offline home template needs validated rule distinct ad and stable informative frames`() {
+        val home="01".repeat(32);val ad="10".repeat(32)
+        val active=VisualPolicy.record(VisualPolicy.record(rule,"one",true,true,true,1),"two",true,true,true,2).copy(homeHash=home)
+        assertEquals(home,VisualPolicy.homeTemplate(ad,home,home))
+        assertTrue(VisualPolicy.matchesHome(active,ad,home,home))
+        assertFalse(VisualPolicy.matchesHome(rule.copy(homeHash=home),ad,home,home))
+        assertFalse(VisualPolicy.matchesHome(active,home,home,home))
+        assertFalse(VisualPolicy.matchesHome(active,ad,home,ad))
+        assertEquals("",VisualPolicy.homeTemplate(ad,"1".repeat(64),"1".repeat(64)))
+        assertEquals("",VisualPolicy.homeTemplate("",home,home))
+        val imported=VisualPolicy.import(ruleJson.encodeToString(VisualBundle(rules=listOf(active)))).single()
+        assertEquals("",imported.homeHash)
     }
     @Test fun `sharing never transfers another devices automatic validation`() {
         val active = VisualPolicy.record(VisualPolicy.record(rule, "one", true, true, true, 1), "two", true, true, true, 2)

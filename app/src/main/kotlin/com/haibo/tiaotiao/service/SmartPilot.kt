@@ -30,12 +30,18 @@ class SmartPilot(private val service: SkipAccessibilityService,
     private var captures = 0
     private var stage = "idle"
     private var lastSignals = ""
+    private val homeArea = Area(0f,.88f,1f,.98f)
+    private fun pause(rule: VisualRule, message: String) {
+        val current=repository.visualRules.value.find { it.id==rule.id && it.behavior()==rule.behavior() } ?: return
+        if (current.state==VisualRuleState.PAUSED && current.lastResult.startsWith("用户")) return
+        repository.putVisual(current.copy(state=VisualRuleState.PAUSED,automaticFailures=(current.automaticFailures+1).coerceAtMost(100),lastResult=message))
+    }
     fun summary() = "visual generation=$generation, captures=$captures, stage=$stage, signals=$lastSignals, adScene=$adScene, baselineDone=$baselineDone, queued=$queued"
     fun leaving(owner: String) {
         val rule=pendingRule ?: return
         if (owner==rule.packageName) return
         if (SystemClock.elapsedRealtime()-tapAt<600) {
-            repository.putVisual(rule.copy(state=VisualRuleState.PAUSED,lastResult="点击后前台应用变化，已暂停方案"))
+            pause(rule,"点击后前台应用变化，已暂停方案")
             repository.reportDetection(rule.packageName,"点击后前台应用变化，智能方案已暂停")
         } else repository.reportDetection(rule.packageName,"结果检查期间离开应用，本次不计为验证成功")
         pendingRule=null
@@ -131,11 +137,13 @@ class SmartPilot(private val service: SkipAccessibilityService,
                     }
                     pendingRule=null
                     if (afterFrames.size<2) {
-                        repository.putVisual(chosen.copy(state=VisualRuleState.PAUSED,lastResult="广告或目标仍存在，已暂停"))
+                        pause(chosen,"广告或目标仍存在，已暂停")
                         repository.reportDetection(screen.packageName,"未观察到连续两帧页面变化，智能方案已暂停")
                         return
                     }
                     val after1=afterFrames[0];val after2=afterFrames[1]
+                    val beforeHash=frame.patch(homeArea);val firstHash=after1.patch(homeArea);val secondHash=after2.patch(homeArea)
+                    val homeHash=VisualPolicy.homeTemplate(beforeHash,firstHash,secondHash)
                     val remaining=frame.signals.countdown?.times(1000L) ?: (baseline-(frame.at-adSeenAt))
                     // The first confirmed home frame establishes transition time; the second only
                     // corroborates it and may arrive later because OCR work takes time.
@@ -144,13 +152,14 @@ class SmartPilot(private val service: SkipAccessibilityService,
                     if (chosen.source=="bundled-ocr-demo") {
                         repository.putVisual(VisualPolicy.record(chosen,session,early,true,true,System.currentTimeMillis(),basis))
                         repository.reportDetection(screen.packageName,"演示自动检查完成，无需云端或人工确认")
-                    } else if (chosen.active() && early && ((after1.signals.home && after2.signals.home) ||
+                    } else if (chosen.active() && early && !after1.signals.advertisement && !after2.signals.advertisement &&
+                        ((after1.signals.home && after2.signals.home) || VisualPolicy.matchesHome(chosen,beforeHash,firstHash,secondHash) ||
                         (chosen.homeScene.isNotEmpty() && after1.screen.fingerprint()==chosen.homeScene && after2.screen.fingerprint()==chosen.homeScene))) {
                         repository.reportDetection(screen.packageName,"智能规则本地复用及结果检查通过，未请求云端模型")
                     } else if (cloudReady) {
                         repository.reportDetection(screen.packageName,"已观察到连续页面变化，AI 正在自动复核结果")
                         val homeScene=after2.screen.fingerprint().takeIf { after2.screen.complete && it!=screen.fingerprint() }.orEmpty()
-                        app.visualLearner.verify(chosen,session,listOf(frame.jpeg,after1.jpeg,after2.jpeg),early,true,homeScene,basis)
+                        app.visualLearner.verify(chosen,session,listOf(frame.jpeg,after1.jpeg,after2.jpeg),early,true,homeScene,homeHash,basis)
                     }
                 } finally { afterFrames.forEach { it.close() } }
             } else if (rule==null && !demo(screen) && !frame.signals.home && queued<2 && SystemClock.elapsedRealtime()>=nextLearnAt) {
