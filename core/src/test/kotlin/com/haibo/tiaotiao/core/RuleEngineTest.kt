@@ -43,6 +43,32 @@ class RuleEngineTest {
         assertEquals(screen.fingerprint(), changed.fingerprint())
         assertNotNull(RuleEngine.locate(verified(), changed))
     }
+    @Test fun `known scene waits locally during launch movement then reuses its original approval`() {
+        val rule = verified()
+        val moving = screen.copy(nodes = screen.nodes.dropLast(1) + target.copy(bounds = Area(.67f,.26f,.74f,.28f)))
+        assertEquals(screen.fingerprint(), moving.fingerprint())
+        assertNull(RuleEngine.locate(rule, moving))
+        assertEquals(VerifiedSceneLookup.UnmatchedTarget, RuleEngine.resolveVerified(listOf(rule), moving))
+        val settled = screen.copy(nodes = screen.nodes.dropLast(1) + target.copy(label = "跳过 3"))
+        assertEquals(rule, (RuleEngine.resolveVerified(listOf(rule), settled) as VerifiedSceneLookup.Matched).rule)
+        assertTrue(rule.isVerified())
+    }
+    @Test fun `different app versions and structures still require new scene analysis`() {
+        val rules = listOf(verified())
+        assertEquals(VerifiedSceneLookup.Unknown, RuleEngine.resolveVerified(rules, screen.copy(versionCode = 13)))
+        assertEquals(VerifiedSceneLookup.Unknown, RuleEngine.resolveVerified(rules, screen.copy(nodes = listOf(target))))
+        assertEquals(VerifiedSceneLookup.Unknown, RuleEngine.resolveVerified(rules, screen.copy(packageName = "com.other.app")))
+        assertEquals(VerifiedSceneLookup.Unknown, RuleEngine.resolveVerified(listOf(draft()), screen))
+    }
+    @Test fun `an unconfirmed duplicate with shifted geometry cannot replace the verified target`() {
+        val rule = verified()
+        val moving = screen.copy(nodes = screen.nodes.dropLast(1) + target.copy(bounds = Area(.67f,.26f,.74f,.28f)))
+        val duplicate = RuleEngine.compile(moving, moving.nodes.last(), "test", 400)
+        val rules = listOf(rule, duplicate)
+        assertEquals(VerifiedSceneLookup.UnmatchedTarget, RuleEngine.resolveVerified(rules, moving))
+        assertEquals(rule, RuleEngine.autoMatch(rules, screen))
+        assertFalse(duplicate.isVerified())
+    }
     @Test fun `login and onboarding skip never become ad targets`() {
         listOf("跳过登录", "跳过引导", "跳过教程", "点击跳过登录", "安装").forEach { label ->
             val node = target.copy(label = label)

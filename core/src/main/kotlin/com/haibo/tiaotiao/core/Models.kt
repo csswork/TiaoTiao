@@ -97,6 +97,12 @@ data class SkipRule(
 @Serializable
 data class RuleBundle(val schemaVersion: Int = 1, val exportedAt: Long, val rules: List<SkipRule>)
 
+sealed interface VerifiedSceneLookup {
+    data class Matched(val rule: SkipRule) : VerifiedSceneLookup
+    data object UnmatchedTarget : VerifiedSceneLookup
+    data object Unknown : VerifiedSceneLookup
+}
+
 object RuleEngine {
     fun compile(screen: ScreenSnapshot, candidate: ScreenNode, source: String, now: Long): SkipRule {
         require(candidate in screen.candidates() && SignalText.hasSkip(candidate.label)) { "目标不是当前页面中可确认的跳过控件" }
@@ -116,8 +122,21 @@ object RuleEngine {
         }
         return targets.singleOrNull()
     }
-    fun autoMatch(rules: List<SkipRule>, screen: ScreenSnapshot): SkipRule? = rules
-        .filter { it.isVerified() && locate(it, screen) != null }.singleOrNull()
+    /** Knowing the scene and being able to click it are separate decisions. Position changes
+     * during launch must not send a known scene back through the model or weaken the selector. */
+    fun resolveVerified(rules: List<SkipRule>, screen: ScreenSnapshot): VerifiedSceneLookup {
+        val fingerprint = screen.fingerprint()
+        val known = rules.filter { it.isVerified() && it.packageName == screen.packageName &&
+            it.versionCode == screen.versionCode && it.screenFingerprint == fingerprint }
+        val match = known.filter { locate(it, screen) != null }.singleOrNull()
+        return when {
+            match != null -> VerifiedSceneLookup.Matched(match)
+            known.isNotEmpty() -> VerifiedSceneLookup.UnmatchedTarget
+            else -> VerifiedSceneLookup.Unknown
+        }
+    }
+    fun autoMatch(rules: List<SkipRule>, screen: ScreenSnapshot): SkipRule? =
+        (resolveVerified(rules, screen) as? VerifiedSceneLookup.Matched)?.rule
     fun recordTrial(rule: SkipRule, accepted: Boolean, now: Long): SkipRule {
         require(accepted) { "系统未接受点击，不能进入结果确认" }
         require(rule.status in setOf(RuleStatus.PENDING, RuleStatus.IMPORTED, RuleStatus.TRIALLED))

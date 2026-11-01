@@ -196,10 +196,16 @@ class SkipAccessibilityService : AccessibilityService() {
         report(screen.packageName, "begin", "开始检测开屏界面")
         val fingerprint = screen.fingerprint()
         val rules = repository.rules.value
-        val approved = RuleEngine.autoMatch(rules, screen)
-        if (approved != null) {
-            report(screen.packageName, "local-match", "本地已验证规则匹配成功，未请求 Jev")
-            dispatch(approved, false); return
+        when (val local = RuleEngine.resolveVerified(rules, screen)) {
+            is VerifiedSceneLookup.Matched -> {
+                report(screen.packageName, "local-match", "本地已验证规则匹配成功，未请求 Jev")
+                dispatch(local.rule, false); return
+            }
+            VerifiedSceneLookup.UnmatchedTarget -> {
+                report(screen.packageName, "local-wait", "已识别本地验证界面，等待目标位置匹配；本轮不重复请求 Jev")
+                return
+            }
+            VerifiedSceneLookup.Unknown -> Unit
         }
         val existing = rules.filter { it.packageName == screen.packageName && it.screenFingerprint == fingerprint }
         // Disabled/ambiguous rules never trigger new AI proposals behind the user's back.
@@ -234,7 +240,7 @@ class SkipAccessibilityService : AccessibilityService() {
             return
         }
         if (!gate.claimRequest(fingerprint)) return
-        if (!demo) report(screen.packageName, "request", "正在通过 ${settings.jevProvider.displayName} 分析跳过目标…")
+        if (!demo) repository.reportDetection(screen.packageName, "正在通过 ${settings.jevProvider.displayName} 分析跳过目标…")
         val candidate = if (demo) screen.candidates().singleOrNull { SignalText.hasSkip(it.label) } else try {
             withContext(Dispatchers.IO) { jev.select(screen, repository.vault.get("jevKey"), settings.model, settings.jevProvider) }
         } catch (cancelled: CancellationException) { throw cancelled }
