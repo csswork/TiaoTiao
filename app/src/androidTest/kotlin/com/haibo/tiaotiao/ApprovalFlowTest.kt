@@ -54,6 +54,18 @@ class ApprovalFlowTest {
         waitUntil { hasText("已进入演示首页") }
         assertTrue(hasText("跳过登录")) // Normal-page skip controls remain untouched.
 
+        // Real application transitions must reopen detection without DemoActivity resetting the gate.
+        repeat(3) { index ->
+            shell("am start -W -a android.intent.action.MAIN -c android.intent.category.HOME")
+            waitUntil { automation.windows.none { it.root?.packageName?.toString() == context.packageName } }
+            Thread.sleep(400)
+            instrumentation.runOnMainSync {
+                context.startActivity(Intent(context, DemoActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+            waitUntil { repository.logs.value.count { it.message == "已按验证规则发起跳过点击" } == autoBefore + 2 + index }
+            waitUntil { hasText("已进入演示首页") }
+        }
+
         // Shared verification history must not bypass local confirmation.
         val exported = repository.exportVerified()
         repository.remove(id)
@@ -61,7 +73,7 @@ class ApprovalFlowTest {
         assertEquals(RuleStatus.IMPORTED, repository.rules.value.single { it.id == id }.status)
         openDemo()
         waitUntil { hasText("试跳") }
-        assertEquals(autoBefore + 1, repository.logs.value.count { it.message == "已按验证规则发起跳过点击" })
+        assertEquals(autoBefore + 4, repository.logs.value.count { it.message == "已按验证规则发起跳过点击" })
         click("试跳")
         waitUntil { repository.rules.value.single { it.id == id }.status == RuleStatus.TRIALLED }
         click("确实跳过")

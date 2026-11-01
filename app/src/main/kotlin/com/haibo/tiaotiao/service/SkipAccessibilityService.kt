@@ -20,6 +20,8 @@ import com.haibo.tiaotiao.network.JevClient
 import com.haibo.tiaotiao.network.modelErrorMessage
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
+import java.io.FileDescriptor
+import java.io.PrintWriter
 import java.lang.ref.WeakReference
 
 class SkipAccessibilityService : AccessibilityService() {
@@ -37,6 +39,10 @@ class SkipAccessibilityService : AccessibilityService() {
     private var overlayIsResult = false
     private var expireJob: Job? = null
     private var diagnosticPackage: String? = null
+    private var eventWindowId: Int? = null
+    private var targetEventPackage: String? = null
+    private var targetEventAt = 0L
+    private var lastReadState = "尚未读取界面"
     private val reportedReasons = mutableSetOf<String>()
     private fun report(pkg: String, reason: String, message: String) {
         if (diagnosticPackage != pkg) { diagnosticPackage = pkg; reportedReasons.clear() }
@@ -58,17 +64,26 @@ class SkipAccessibilityService : AccessibilityService() {
     }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null || !repository.settings.value.enabled) return
+        val eventPackage = event.packageName?.toString().orEmpty()
+        if (eventPackage in repository.settings.value.packages) {
+            targetEventPackage = eventPackage
+            targetEventAt = SystemClock.elapsedRealtime()
+        }
         // Foreground changes must cancel a request immediately rather than waiting for its result.
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            val pkg = event.packageName?.toString().orEmpty()
+            val pkg = eventPackage
+            eventWindowId = event.windowId.takeIf { it >= 0 }
             if (pkg in repository.settings.value.packages) report(pkg, "event", "收到目标应用窗口事件，等待可读取的开屏界面")
             if (pkg.isNotBlank() && pkg != packageName && pkg !in repository.settings.value.packages) {
                 // Toasts/system-owned windows are not proof that the target application left the foreground.
-                val root = windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isFocused }?.root
+                val available = windows
+                val appWindow = selectedWindow(available)
+                val root = appWindow?.root
                 val actualPackage = root?.packageName?.toString()
                 @Suppress("DEPRECATION") root?.recycle()
                 if (actualPackage != null && actualPackage != packageName && actualPackage !in repository.settings.value.packages) {
-                    scanJob?.cancel(); gate.observe(null, SystemClock.elapsedRealtime()); hideOverlay()
+                    scanJob?.cancel(); gate.observeWindow(actualPackage, true, SystemClock.elapsedRealtime()); hideOverlay()
+                    targetEventPackage = null
                     diagnosticPackage = null; reportedReasons.clear()
                     return
                 }
@@ -79,32 +94,79 @@ class SkipAccessibilityService : AccessibilityService() {
     private fun scheduleScan() {
         if (scanJob?.isActive == true) return
         scanJob = scope.launch {
-            delay(180)
-            try { scan() }
+            // Retry temporarily missing roots/content even if the OEM sends no further content event.
+            // This loop never extends the session or retries a dispatched click.
+            val deadline = SystemClock.elapsedRealtime() + 10_000
+            delay(80)
+            try {
+                do {
+                    scan()
+                    val now = SystemClock.elapsedRealtime()
+                    val target = targetEventPackage
+                    if (target == null || target !in repository.settings.value.packages || !repository.settings.value.enabled ||
+                        now >= deadline || now - targetEventAt >= 10_000 || gate.actionDispatched ||
+                        (gate.packageName == target && !gate.isOpen(target, now))) break
+                    delay(160)
+                } while (isActive)
+            }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { report(gate.packageName.orEmpty(), "error", "检测未完成，已结束本轮；可重新打开应用重试") }
         }
     }
     fun restartSession() {
         scanJob?.cancel(); gate.reset(); hideOverlay()
+        targetEventPackage = null; eventWindowId = null
         diagnosticPackage = null; reportedReasons.clear()
     }
+    private fun selectedWindow(available: List<AccessibilityWindowInfo>): AccessibilityWindowInfo? {
+        val id = WindowSelection.choose(available.map {
+            WindowCandidate(it.id, it.type == AccessibilityWindowInfo.TYPE_APPLICATION, it.isFocused, it.isActive)
+        }, eventWindowId)
+        return available.firstOrNull { it.id == id }
+    }
+    private fun unreadable(reason: String, message: String) {
+        lastReadState = message
+        val target = targetEventPackage ?: return
+        if (SystemClock.elapsedRealtime() - targetEventAt < 10_000) report(target, reason, message)
+    }
     private fun observe(): Observation? {
-        if (!getSystemService(PowerManager::class.java).isInteractive || getSystemService(KeyguardManager::class.java).isKeyguardLocked) return null
-        val applicationWindow = windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
-            .sortedWith(compareByDescending<AccessibilityWindowInfo> { it.isFocused }.thenByDescending { it.isActive }).firstOrNull { it.isFocused || it.isActive }
-        val root = applicationWindow?.root ?: rootInActiveWindow ?: return null
+        if (!getSystemService(PowerManager::class.java).isInteractive || getSystemService(KeyguardManager::class.java).isKeyguardLocked) {
+            gate.observeWindow(null, false, SystemClock.elapsedRealtime(), deviceLocked = true)
+            unreadable("locked", "屏幕关闭或设备锁定，已暂停检测")
+            return null
+        }
+        val availableWindows = windows
+        val applicationWindow = selectedWindow(availableWindows)
+        val root = applicationWindow?.root ?: rootInActiveWindow ?: run {
+            unreadable("no-root", "系统尚未提供可读取的应用界面，正在短时重试（未调用 Jev）")
+            return null
+        }
         val pkg = root.packageName?.toString().orEmpty()
+        val belongsToApplication = availableWindows.any { it.id == root.windowId && it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+        if (belongsToApplication) {
+            val oldPackage = gate.packageName
+            gate.observeWindow(pkg, true, SystemClock.elapsedRealtime())
+            if (oldPackage != pkg) { diagnosticPackage = null; reportedReasons.clear() }
+        }
         if (pkg != packageName && pkg !in repository.settings.value.packages) {
+            targetEventPackage = null
+            lastReadState = "当前为未选择的应用"
             @Suppress("DEPRECATION") root.recycle()
             return null
         }
         val version = runCatching {
             @Suppress("DEPRECATION") val info = packageManager.getPackageInfo(pkg, 0)
             if (android.os.Build.VERSION.SDK_INT >= 28) info.longVersionCode else @Suppress("DEPRECATION") info.versionCode.toLong()
-        }.getOrElse { @Suppress("DEPRECATION") root.recycle(); return null }
+        }.getOrElse {
+            lastReadState = "无法读取应用版本（${it.javaClass.simpleName}），未执行点击或请求 Jev"
+            report(pkg, "version-unavailable", lastReadState)
+            @Suppress("DEPRECATION") root.recycle()
+            return null
+        }
         val metrics = resources.displayMetrics
-        return ScreenReader.read(root, version, metrics.widthPixels, metrics.heightPixels)
+        return ScreenReader.read(root, version, metrics.widthPixels, metrics.heightPixels).also {
+            lastReadState = "已读取 ${it.screen.nodes.size} 个节点，界面完整=${it.screen.complete}"
+        }
     }
     private fun isDemo(screen: ScreenSnapshot) = screen.packageName == packageName && screen.nodes.any { it.resourceId.endsWith(":id/demo_skip") }
     private fun eligible(screen: ScreenSnapshot) = (screen.packageName in repository.settings.value.packages && screen.packageName != packageName) || isDemo(screen)
@@ -135,7 +197,10 @@ class SkipAccessibilityService : AccessibilityService() {
         val fingerprint = screen.fingerprint()
         val rules = repository.rules.value
         val approved = RuleEngine.autoMatch(rules, screen)
-        if (approved != null) { dispatch(approved, false); return }
+        if (approved != null) {
+            report(screen.packageName, "local-match", "本地已验证规则匹配成功，未请求 Jev")
+            dispatch(approved, false); return
+        }
         val existing = rules.filter { it.packageName == screen.packageName && it.screenFingerprint == fingerprint }
         // Disabled/ambiguous rules never trigger new AI proposals behind the user's back.
         if (existing.any { it.status == RuleStatus.DISABLED } || existing.count { it.isVerified() } > 1) {
@@ -154,6 +219,9 @@ class SkipAccessibilityService : AccessibilityService() {
         if (screen.candidates().none { SignalText.hasSkip(it.label) }) {
             report(screen.packageName, "no-target", "读取 ${screen.nodes.size} 个节点、${screen.candidates().size} 个可点击控件，尚未找到文字跳过按钮；图片按钮暂不支持")
             return
+        }
+        if (rules.any { it.packageName == screen.packageName && it.isVerified() }) {
+            report(screen.packageName, "local-miss", "已有验证规则与当前界面不匹配，将按新界面处理")
         }
         val demo = isDemo(screen)
         val settings = repository.settings.value
@@ -204,7 +272,23 @@ class SkipAccessibilityService : AccessibilityService() {
                 repository.put(updated)
                 repository.log(current.packageName, "试跳已发起，等待你确认实际结果")
                 showResult(updated)
-            } else repository.reportDetection(current.packageName, if (accepted) "已按验证规则发起跳过点击" else "系统未接受点击；未重试")
+            } else {
+                repository.reportDetection(current.packageName, if (accepted) "已按验证规则发起跳过点击" else "系统未接受点击；未重试")
+                if (accepted) observeClickEffect(current, gate.generation)
+            }
+        }
+    }
+    private fun observeClickEffect(rule: SkipRule, generation: Long) {
+        scope.launch {
+            delay(900)
+            if (!repository.settings.value.enabled || gate.generation != generation) return@launch
+            val observation = observe() ?: return@launch
+            observation.use {
+                if (gate.generation != generation || it.screen.packageName != rule.packageName) return@use
+                repository.reportDetection(rule.packageName, if (RuleEngine.locate(rule, it.screen) != null)
+                    "规则命中，但点击后跳过目标仍存在；已停止重复点击，请反馈该规则"
+                    else "已发起规则点击，观察到页面发生变化")
+            }
         }
     }
     private fun showProposal(rule: SkipRule) {
@@ -255,6 +339,13 @@ class SkipAccessibilityService : AccessibilityService() {
         overlay = null; overlayRuleId = null; overlayIsResult = false
     }
     override fun onInterrupt() { scanJob?.cancel(); gate.reset(); hideOverlay() }
+    override fun dump(fd: FileDescriptor, writer: PrintWriter, args: Array<out String>) {
+        writer.println("TiaoTiao detection diagnostics (no credentials or screen text)")
+        writer.println("enabled=${repository.settings.value.enabled}, scanning=${scanJob?.isActive == true}, session=${gate.generation}, dispatched=${gate.actionDispatched}")
+        writer.println("sessionPackage=${gate.packageName}, eventPackage=$targetEventPackage, eventWindow=$eventWindowId")
+        writer.println("lastRead=$lastReadState")
+        windows.forEach { writer.println("window=${it.id}, type=${it.type}, focused=${it.isFocused}, active=${it.isActive}") }
+    }
     override fun onDestroy() {
         hideOverlay(); scope.cancel(); repository.connected.value = false
         if (instance === this) serviceRef = WeakReference(null)

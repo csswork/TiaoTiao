@@ -380,7 +380,7 @@ class MainActivity : ComponentActivity() {
                 Text("第一版使用节点识别，不采集截图。图片分析会在后续单独验证后加入。", style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = { task { repository.clearSamples(); "已清空本地样本" } }, enabled = !busy) { Text("清空样本") }
             } }
-            item { Text("TiaoTiao 0.1.3 · Android 8.0 及以上\n服务被系统关闭后，需在系统设置重新开启。", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
+            item { Text("TiaoTiao 0.1.5 · Android 8.0 及以上\n服务被系统关闭后，需在系统设置重新开启。", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
         }
     }
 }

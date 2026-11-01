@@ -11,9 +11,9 @@ import com.haibo.tiaotiao.R
 import com.haibo.tiaotiao.service.SkipAccessibilityService
 
 class DemoActivity : Activity() {
-    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); showAd() }
-    private fun showAd() {
-        SkipAccessibilityService.instance?.restartSession()
+    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); showAd(restart = false) }
+    private fun showAd(restart: Boolean = true) {
+        if (restart) SkipAccessibilityService.instance?.restartSession()
         setContentView(LinearLayout(this).apply {
             id = R.id.demo_ad; orientation = LinearLayout.VERTICAL
             setPadding(36, 72, 36, 72); setBackgroundColor(Color.rgb(228, 239, 232))

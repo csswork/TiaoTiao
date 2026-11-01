@@ -95,6 +95,40 @@ class RuleEngineTest {
         listOf("13812345678", "验证码1234", "你好张三", "订单金额100").forEach { assertEquals("", SignalText.sanitize(it)) }
         assertEquals("跳过", SignalText.sanitize("跳过 3 秒"))
     }
+    @Test fun `returning through a launcher starts a new session even without focus flags`() {
+        val gate = SessionGate()
+        gate.observeWindow("com.zhihu.android", true, 0)
+        assertTrue(gate.isOpen("com.zhihu.android", 1))
+        assertTrue(gate.claimRequest("same-ad"))
+        gate.dispatched()
+        val firstGeneration = gate.generation
+        gate.observeWindow("com.miui.home", true, 100)
+        gate.observeWindow("com.zhihu.android", true, 200)
+        assertTrue(gate.generation > firstGeneration)
+        assertTrue(gate.isOpen("com.zhihu.android", 201))
+        assertTrue(gate.claimRequest("same-ad"))
+    }
+    @Test fun `temporary missing roots and system overlays never reopen a completed session`() {
+        val gate = SessionGate()
+        gate.observeWindow("com.zhihu.android", true, 0)
+        gate.dispatched()
+        val generation = gate.generation
+        gate.observeWindow(null, true, 100)
+        gate.observeWindow("android", false, 200)
+        gate.observeWindow("com.zhihu.android", true, 300)
+        assertEquals(generation, gate.generation)
+        assertFalse(gate.isOpen("com.zhihu.android", 301))
+    }
+    @Test fun `locking a phone ends the session before the same app returns`() {
+        val gate = SessionGate()
+        gate.observeWindow("com.zhihu.android", true, 0)
+        gate.dispatched()
+        val generation = gate.generation
+        gate.observeWindow(null, false, 100, deviceLocked = true)
+        gate.observeWindow("com.zhihu.android", true, 200)
+        assertTrue(gate.generation > generation)
+        assertTrue(gate.isOpen("com.zhihu.android", 201))
+    }
     @Test fun `Jev never chooses an invented node or non skip control`() {
         fun response(id: String, probability: String = "0.98") = """{"answers":{"splash":{"type":"noul","noul":$probability},"target":{"type":"choice","choice":"$id","confidence":0.98,"probabilities":{"0.1":0.98,"none":0.02}}}}"""
         assertEquals(target, JevProtocol.parse(response("0.1"), screen))
