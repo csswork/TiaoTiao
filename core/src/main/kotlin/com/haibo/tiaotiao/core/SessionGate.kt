@@ -6,6 +6,7 @@ class SessionGate(private val durationMillis: Long = 10_000) {
     private var startedAt = 0L
     private val requested = mutableSetOf<String>()
     private var dispatched = false
+    val actionDispatched: Boolean get() = dispatched
     fun observe(packageName: String?, now: Long) {
         if (this.packageName == packageName) return
         this.packageName = packageName

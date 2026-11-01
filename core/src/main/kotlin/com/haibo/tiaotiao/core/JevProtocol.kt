@@ -4,6 +4,24 @@ import kotlinx.serialization.json.*
 
 object JevProtocol {
     private val json = Json { ignoreUnknownKeys = true }
+    fun probeRequest(model: String): String = buildJsonObject {
+        put("model", model)
+        put("state", "Connection test: the number two is greater than the number one.")
+        putJsonObject("questions") {
+            putJsonObject("connection") {
+                put("type", "noul")
+                put("instructions", "Is the number two greater than the number one?")
+            }
+        }
+    }.toString()
+
+    fun validateProbe(response: String) {
+        val answer = json.parseToJsonElement(response).jsonObject["answers"]?.jsonObject
+            ?.get("connection")?.jsonObject ?: error("Jev 连接测试响应缺少 connection")
+        require(answer["type"]?.jsonPrimitive?.content == "noul") { "Jev 连接测试响应格式不正确" }
+        val probability = answer["noul"]?.jsonPrimitive?.doubleOrNull
+        require(probability != null && probability.isFinite() && probability in .9..1.0) { "Jev 已响应，但固定测试结果不符合预期" }
+    }
     fun request(screen: ScreenSnapshot, model: String): String = buildJsonObject {
         put("model", model)
         putJsonObject("state") {

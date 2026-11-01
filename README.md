@@ -4,11 +4,12 @@
 
 ## 当前版本
 
-当前版本 `0.1.2`，Android 8.0 / API 26 及以上，Kotlin + Compose，使用系统无障碍服务，无需 Root。应用显示名称统一为 TiaoTiao。
+当前版本 `0.1.3`，Android 8.0 / API 26 及以上，Kotlin + Compose，使用系统无障碍服务，无需 Root。应用显示名称统一为 TiaoTiao。
 
 - 应用选择与总开关；显示无障碍服务实际连接状态。
 - 未配置 Jev 密钥时，首页顶部显示醒目入口，点击后直接定位并聚焦密钥输入框；保存后提示自动隐藏，清除后重新显示。
 - Jev 官方 API 节点识别：只从当前观察到的控件中选择，结果不明确则结束本轮。
+- 支持 TypeSafe 直连和 Vercel AI Gateway，按服务使用对应模型名；提供固定请求的连接测试，以及首页连接与最近检测状态。
 - 新规则底部浮层试跳、人工确认；未确认规则不能自动执行。
 - 已验证规则本地离线匹配；校验包名、应用版本、界面结构和目标几何位置。
 - JSON 导入、导出和系统分享；导入规则先试跳确认，不自动信任外部验证状态。
@@ -20,14 +21,27 @@
 
 ## 手机安装与使用
 
-1. 安装 `app/build/outputs/apk/debug/app-debug.apk`，或 `artifacts/TiaoTiao-0.1.2-debug.apk`。
+1. 安装 `app/build/outputs/apk/debug/app-debug.apk`，或 `artifacts/TiaoTiao-0.1.3-debug.apk`。
 2. 打开 TiaoTiao，点击“打开无障碍设置”，在系统设置中开启“TiaoTiao”。部分安装来源和系统版本需要先在应用详情中允许受限设置。
 3. 打开“自动跳过”。先点“打开模拟开屏”，在底部浮层点“试跳”，看到进入演示首页后点“确实跳过”。再次打开模拟开屏，检查自动复用。
 4. 在“应用”选择需要处理的应用；默认全部关闭。
-5. 点击首页顶部“填写 API Key”，或在“设置”填入 TypeSafe Jev API Key，保存，并自行开启“允许云端分析”。不要把密钥发到聊天或写进仓库。
+5. 点击首页顶部“填写 API Key”，或进入“设置”，选择与密钥对应的接入服务。Vercel AI Gateway 使用模型 `typesafe-ai/jev`，TypeSafe 直连使用 `jev-latest`。点击“保存并测试”，确认连接成功后开启“允许云端分析”。不要把密钥发到聊天或写进仓库。
 6. 打开目标应用。新方案先显示试跳提示；确认后规则保存在手机应用私有目录的 `files/rules.json`。若开屏已结束，可下次打开应用再试跳。
 
 无障碍服务由系统管理，应用无法自行绕过系统设置恢复权限。小米 14 Pro / HyperOS 如回收服务，请检查 TiaoTiao 首页连接状态并从系统设置重新开启。实现采用标准 Android API，目前没有针对小米的私有接口。
+
+首页会显示模型是否已测试、鉴权失败、额度不足、网络失败等结果，以及最近一次检测的原因。进入已选应用后，记录会区分窗口事件、开始读取、找不到文字跳过控件、节点读取超限、模型请求和候选方案，避免把所有情况都表现为“没有反应”。图片按钮仍不在首版能力范围内。
+
+## Jev 接入配置
+
+| 接入服务 | 密钥来源 | 默认模型 | 请求地址 |
+| --- | --- | --- | --- |
+| TypeSafe 直连 | TypeSafe | `jev-latest` | `https://api.typesafe.ai/v1/systemone` |
+| Vercel AI Gateway | Vercel AI Gateway | `typesafe-ai/jev` | `https://ai-gateway.vercel.sh/typesafe/v1/systemone` |
+
+接入使用固定地址，不自动把同一密钥轮流发往多个服务。切换服务后模型名会按服务迁移；输入框留空沿用手机中已保存的密钥。保存并测试只发送一条固定的公开测试语句，不读取其他应用，也不自动开启云端分析。测试会使用对应账户的模型额度。
+
+Vercel 路径依据 [TypeSafe API with AI Gateway 官方文档](https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe)，保留 Noul/Choice 请求与响应格式。
 
 ## 数据与分享
 
@@ -37,7 +51,7 @@
 
 “规则”页面可导出、分享已验证规则，或者导入 JSON。导出不包含 API Key、同步凭据、样本、完整屏幕内容或日志。文件最多 1 MB、500 条规则；不执行任意脚本，不支持压缩包导入。
 
-首版只保留经过允许词筛选的节点文本，例如“广告”“跳过”；输入框和密码子树不采集。每条新方案保存一个本地样本，最多 100 个，日志最多 150 条。删除规则会删除对应样本。云端识别把筛选后的控件数据发送给 TypeSafe，截图不采集也不上传。
+首版只保留经过允许词筛选的节点文本，例如“广告”“跳过”；输入框和密码子树不采集。每条新方案保存一个本地样本，最多 100 个，日志最多 150 条。删除规则会删除对应样本。云端识别把筛选后的控件数据发送给所选接入服务及其模型提供方，截图不采集也不上传。
 
 ## HTTPS / WebDAV 同步
 
@@ -54,7 +68,7 @@
 需要 JDK 21、Android SDK platform 37，以及 Android SDK build-tools。Gradle Wrapper 固定在 9.7.0，Android Gradle Plugin 9.3.1；运行目标版本为 Android 16 / API 36，最低 API 26。设置 `ANDROID_HOME`，或在不提交到仓库的 `local.properties` 中设置 `sdk.dir`。
 
 ```sh
-./gradlew :core:test :app:lintDebug :app:assembleDebug
+./gradlew :core:test :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 ```
 
 端到端测试只在独立模拟器运行，会开启本应用无障碍服务、调整本应用设置并替换模拟页面的规则；不调用 Jev、不操作第三方应用：
@@ -74,4 +88,4 @@ docs/AI_DATA_PLAN.md  完整设计与后续阶段
 artifacts/           可安装 APK、验证记录及页面截图
 ```
 
-Jev 接入依据 TypeSafe [官方 Choice 文档](https://docs.typesafe.ai/primitives/choice)与 [API 定义](https://api.typesafe.ai/openapi.json)。目前没有可用于真实模型验证的 API Key；模型实际准确率、真实广告效果、远端同步服务和小米真机表现需要在配置后验证。接口格式和本地执行流程分别测试，演示不代表已验证模型准确率。
+Jev 接入依据 TypeSafe [官方 Choice 文档](https://docs.typesafe.ai/primitives/choice)、[API 定义](https://api.typesafe.ai/openapi.json)与 Vercel 的官方兼容接口文档。模型连通性、实际识别效果与 UI 演示分别验证；演示通过不代表所有第三方应用的广告都能识别。各版本验证范围见 `artifacts/VERIFICATION.md`。

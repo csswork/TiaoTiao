@@ -2,6 +2,17 @@
 
 日期：2026-11-01（Asia/Shanghai）。
 
+## 0.1.3 Vercel 网关与检测诊断
+
+- 新安装包：`TiaoTiao-0.1.3-debug.apk`，versionCode 4。
+- 增加 Vercel AI Gateway 的 TypeSafe 兼容接口，使用 `typesafe-ai/jev` 模型和 Gateway 密钥；保留 TypeSafe 直连。
+- 增加保存并测试、固定公开语句的连接探测、首页连接状态和最近检测原因。请求失败不显示原始响应正文或密钥。
+- 兼容“跳过广告”“5秒 | 跳过”“Skip ad 3s”等文字形式，继续排除跳过登录、教程等普通功能。
+- 修复系统提示窗口被误当作应用离开前台、短暂读不到界面时重置检测计时的问题。
+- 核心测试 19 项、Android JVM 网络/错误测试 5 项通过；APK 构建和 Lint（无 Error/Fatal）通过。
+- 在独立 API 36 模拟器手动指定 serial 安装测试 APK，运行完整人工确认与离线复用流程，结果 `OK (1 test)`。未在真实手机安装或运行测试 APK，避免测试重置真实配置。
+- 已在小米手机覆盖安装 0.1.3，保留原配置与加密凭据；真实网关连接和知乎检测结果将在本机验证后补充。
+
 ## 0.1.2 首页密钥入口
 
 - 新安装包：`TiaoTiao-0.1.2-debug.apk`，versionCode 3。

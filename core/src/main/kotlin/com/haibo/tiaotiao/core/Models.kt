@@ -48,7 +48,9 @@ data class ScreenSnapshot(
 }
 
 object SignalText {
-    private val skip = Regex("^(?:跳过|skip)(?:\\s*[（(]?\\s*\\d+\\s*(?:s|秒)?\\s*[)）]?)?$|^\\d+\\s*(?:秒|s)?\\s*(?:后)?\\s*(?:跳过|skip)$", RegexOption.IGNORE_CASE)
+    private const val SKIP_WORD = "(?:跳过(?:广告)?|关闭广告|skip(?:\\s+ad)?)"
+    private const val COUNTDOWN = "[（(\\[]?\\s*\\d+\\s*(?:s|秒)?\\s*[)）\\]]?"
+    private val skip = Regex("^(?:$SKIP_WORD(?:\\s*[|｜·:：]?\\s*$COUNTDOWN)?|$COUNTDOWN\\s*(?:后)?\\s*[|｜·:：]?\\s*$SKIP_WORD)$", RegexOption.IGNORE_CASE)
     fun isSkip(value: String) = skip.matches(value.trim().take(80))
     fun sanitize(value: String): String {
         val text = value.trim().take(200)

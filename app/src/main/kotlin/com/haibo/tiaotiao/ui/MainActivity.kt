@@ -36,8 +36,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.haibo.tiaotiao.TiaoApplication
 import com.haibo.tiaotiao.core.*
 import com.haibo.tiaotiao.data.AppRepository
+import com.haibo.tiaotiao.data.ConnectionState
 import com.haibo.tiaotiao.network.RuleSyncClient
 import com.haibo.tiaotiao.network.readLimited
+import com.haibo.tiaotiao.network.testModelConnection
 import com.haibo.tiaotiao.service.SkipAccessibilityService
 import java.io.File
 import java.text.SimpleDateFormat
@@ -67,6 +69,8 @@ class MainActivity : ComponentActivity() {
         val logs by repository.logs.collectAsStateWithLifecycle()
         val connected by repository.connected.collectAsStateWithLifecycle()
         val samples by repository.sampleCount.collectAsStateWithLifecycle()
+        val modelConnection by repository.modelConnection.collectAsStateWithLifecycle()
+        val detection by repository.detection.collectAsStateWithLifecycle()
         val scope = rememberCoroutineScope()
         val snackbar = remember { SnackbarHostState() }
         var tab by remember { mutableIntStateOf(0) }
@@ -138,10 +142,28 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
+                        if (hasJevKey) item(key = "model_connection") {
+                            SectionCard("Jev · ${settings.jevProvider.displayName}") {
+                                Text(modelConnection.message, color = if (modelConnection.state == ConnectionState.FAILED) Color(0xFF9C3B20) else Pine,
+                                    fontWeight = FontWeight.Medium)
+                                Text(if (settings.cloudEnabled) "云端分析已开启 · ${settings.model}" else "云端分析尚未开启，仅使用已验证的本地规则",
+                                    style = MaterialTheme.typography.bodySmall)
+                                detection?.let { Text("最近检测：${it.message}", style = MaterialTheme.typography.bodyMedium) }
+                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Button(onClick = { task { testModelConnection(repository) } }, enabled = !busy) { Text("测试连接") }
+                                    OutlinedButton(onClick = { focusJevKey = false; tab = 4 }) { Text("配置服务") }
+                                }
+                            }
+                        }
                         item {
                             Card(colors = CardDefaults.cardColors(containerColor = Pine), shape = RoundedCornerShape(24.dp)) {
                                 Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    Text(if (!connected) "等待服务连接" else if (settings.enabled) "已准备好，轻松一点" else "已暂停", color = Color.White, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                                    Text(when {
+                                        !connected -> "等待服务连接"
+                                        !settings.enabled -> "已暂停"
+                                        settings.cloudEnabled && (!hasJevKey || modelConnection.state != ConnectionState.CONNECTED) -> "本地规则可用，模型待检查"
+                                        else -> "已准备好，轻松一点"
+                                    }, color = Color.White, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
                                     Text("新界面由 Jev 判断，确认后记住。\n熟悉的界面，直接按规则跳过。", color = Color(0xFFE1EEE4))
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text("自动跳过", color = Color.White, modifier = Modifier.weight(1f))
@@ -225,7 +247,7 @@ class MainActivity : ComponentActivity() {
         }, confirmButton = { TextButton(onClick = { disclosure = false; startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) { Text("了解，前往设置") } },
             dismissButton = { TextButton(onClick = { disclosure = false }) { Text("取消") } })
         if (cloudDisclosure) AlertDialog(onDismissRequest = { cloudDisclosure = false }, title = { Text("允许 Jev 分析未知界面") }, text = {
-            Text("对你选中的应用，TiaoTiao 会把筛选后的控件信息（包名、版本、控件 ID、位置及跳过/广告等允许词）发送到 TypeSafe 官方 API。第一版不发送截图或输入框内容。\n\n仅在本地没有匹配规则时请求，已验证规则可离线使用。你可随时关闭。")
+            Text("对你选中的应用，TiaoTiao 会把筛选后的控件信息（包名、版本、控件 ID、位置及跳过/广告等允许词）发送到设置中保存的接入服务及其模型提供方（TypeSafe 直连或 Vercel AI Gateway）。第一版不发送截图或输入框内容。\n\n仅在本地没有匹配规则时请求，已验证规则可离线使用。你可随时关闭。")
         }, confirmButton = { TextButton(onClick = { repository.updateSettings { it.copy(cloudEnabled = true) }; cloudDisclosure = false }) { Text("允许") } },
             dismissButton = { TextButton(onClick = { cloudDisclosure = false }) { Text("取消") } })
         jsonRule?.let { rule -> AlertDialog(onDismissRequest = { jsonRule = null }, title = { Text("规则 JSON") }, text = {
@@ -271,7 +293,9 @@ class MainActivity : ComponentActivity() {
         hasJevKey: Boolean, focusJevKey: Boolean, onKeyEntryHandled: () -> Unit,
         onKeyPresenceChanged: (Boolean) -> Unit, allowCloud: () -> Unit, task: (suspend () -> String) -> Unit) {
         val settings by repository.settings.collectAsStateWithLifecycle()
+        val connection by repository.modelConnection.collectAsStateWithLifecycle()
         var model by remember(settings.model) { mutableStateOf(settings.model) }
+        var provider by remember(settings.jevProvider) { mutableStateOf(settings.jevProvider) }
         var key by remember { mutableStateOf("") }
         val listState = rememberLazyListState()
         val keyFocusRequester = remember { FocusRequester() }
@@ -297,26 +321,39 @@ class MainActivity : ComponentActivity() {
                     Text("允许云端分析", Modifier.weight(1f))
                     Switch(checked = settings.cloudEnabled, modifier = Modifier.semantics { contentDescription = "允许 Jev 云端分析" }, onCheckedChange = { if (it) allowCloud() else repository.updateSettings { s -> s.copy(cloudEnabled = false) } })
                 }
-                Text("使用 TypeSafe 官方 API。API Key 在手机上加密保存，不进入规则文件。", style = MaterialTheme.typography.bodyMedium)
+                Text("选择密钥对应的接入服务", fontWeight = FontWeight.Medium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    JevProvider.entries.forEach { option -> FilterChip(
+                        selected = provider == option, enabled = !busy,
+                        onClick = { model = option.migrateModel(model); provider = option },
+                        label = { Text(if (option == JevProvider.TYPE_SAFE) "TypeSafe 直连" else "Vercel 网关") }) }
+                }
+                Text("Vercel 密钥请选择 Vercel 网关；TypeSafe 密钥请选择直连。密钥在手机上加密保存，留空会沿用已保存的密钥。", style = MaterialTheme.typography.bodyMedium)
                 OutlinedTextField(value = key, onValueChange = { key = it }, label = { Text(if (hasJevKey) "API Key 已保存，留空保持" else "Jev API Key") }, singleLine = true,
                     visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().focusRequester(keyFocusRequester), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
-                OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("模型名称") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("模型名称") },
+                    supportingText = { Text("建议使用 ${provider.defaultModel}") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(onClick = { task {
-                        require(model.trim().matches(Regex("[A-Za-z0-9._-]{1,80}"))) { "模型名称格式无效" }
+                        provider.validateModel(model.trim())
                         if (key.isNotBlank()) repository.vault.set("jevKey", key.trim())
-                        repository.updateSettings { it.copy(model = model.trim()) }
+                        repository.invalidateModelConnection()
+                        repository.updateSettings { it.copy(model = model.trim(), jevProvider = provider) }
                         withContext(Dispatchers.Main) {
                             key = ""; onKeyPresenceChanged(repository.vault.get("jevKey").isNotBlank())
                             focusManager.clearFocus(); keyboard?.hide()
                         }
-                        "已保存 Jev 配置"
-                    } }, enabled = !busy) { Text("保存配置") }
+                        testModelConnection(repository)
+                    } }, enabled = !busy) { Text("保存并测试") }
                     TextButton(onClick = { task {
                         repository.vault.set("jevKey", ""); repository.updateSettings { it.copy(cloudEnabled = false) }
+                        repository.invalidateModelConnection()
                         withContext(Dispatchers.Main) { key = ""; onKeyPresenceChanged(false) }; "已清除密钥并关闭云端分析"
                     } }, enabled = !busy) { Text("清除密钥") }
                 }
+                Text(connection.message, style = MaterialTheme.typography.bodyMedium,
+                    color = if (connection.state == ConnectionState.FAILED) Color(0xFF9C3B20) else Pine)
+                Text("连接测试会发送一条固定测试请求，不读取其他应用的内容。", style = MaterialTheme.typography.bodySmall)
             } }
             item { SectionCard("JSON 同步 · 你的 HTTPS / WebDAV 空间") {
                 Text("填写一个可 GET / PUT 的 JSON 文件地址。手动同步本机已验证规则；更新远端需要服务器支持 ETag 条件写入。", style = MaterialTheme.typography.bodyMedium)
@@ -343,7 +380,7 @@ class MainActivity : ComponentActivity() {
                 Text("第一版使用节点识别，不采集截图。图片分析会在后续单独验证后加入。", style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = { task { repository.clearSamples(); "已清空本地样本" } }, enabled = !busy) { Text("清空样本") }
             } }
-            item { Text("TiaoTiao 0.1.2 · Android 8.0 及以上\n服务被系统关闭后，需在系统设置重新开启。", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
+            item { Text("TiaoTiao 0.1.3 · Android 8.0 及以上\n服务被系统关闭后，需在系统设置重新开启。", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
         }
     }
 }

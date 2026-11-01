@@ -16,11 +16,18 @@ data class AppSettings(
     val cloudEnabled: Boolean = false,
     val packages: Set<String> = emptySet(),
     val model: String = "jev-latest",
+    val jevProvider: JevProvider = JevProvider.TYPE_SAFE,
     val syncUrl: String = "",
     val syncEtag: String = "",
 )
 @Serializable data class LogEntry(val at: Long, val packageName: String, val message: String)
 @Serializable data class StoredSample(val ruleId: String, val source: String, val screen: ScreenSnapshot)
+@Serializable enum class ConnectionState { UNTESTED, CHECKING, CONNECTED, FAILED }
+@Serializable data class ModelConnection(
+    val state: ConnectionState = ConnectionState.UNTESTED,
+    val message: String = "尚未测试模型连接",
+    val checkedAt: Long = 0,
+)
 
 class AppRepository(private val context: Context) {
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -30,6 +37,13 @@ class AppRepository(private val context: Context) {
     val vault = SecretVault(context)
     private val _settings = MutableStateFlow(runCatching { ruleJson.decodeFromString<AppSettings>(prefs.getString("settings", "")!!) }.getOrDefault(AppSettings()))
     val settings = _settings.asStateFlow()
+    private var modelConfigGeneration = 0L
+    private val _modelConnection = MutableStateFlow(runCatching {
+        ruleJson.decodeFromString<ModelConnection>(prefs.getString("modelConnection", "")!!)
+            .let { if (it.state == ConnectionState.CHECKING) ModelConnection() else it }
+    }.getOrDefault(ModelConnection()))
+    val modelConnection = _modelConnection.asStateFlow()
+    val detection = MutableStateFlow<LogEntry?>(null)
     private val _rules = MutableStateFlow(runCatching { RuleCodec.decode(String(rulesFile.readFully(), Charsets.UTF_8)).rules }.getOrElse {
         // Retain any damaged source for recovery; never execute a partially decoded rule set.
         if (rulesFile.baseFile.exists()) rulesFile.baseFile.copyTo(File(context.filesDir, "rules.recovery.json"), overwrite = true)
@@ -43,8 +57,33 @@ class AppRepository(private val context: Context) {
 
     @Synchronized fun updateSettings(transform: (AppSettings) -> AppSettings) {
         val updated = transform(_settings.value)
+        if (updated.jevProvider != _settings.value.jevProvider || updated.model != _settings.value.model) invalidateModelConnection()
         prefs.edit().putString("settings", ruleJson.encodeToString(updated)).apply()
         _settings.value = updated
+    }
+    @Synchronized fun invalidateModelConnection() {
+        modelConfigGeneration++
+        saveModelConnection(ModelConnection())
+    }
+    @Synchronized fun beginModelCheck(): Long {
+        modelConfigGeneration++
+        saveModelConnection(ModelConnection(ConnectionState.CHECKING, "正在测试模型连接…"))
+        return modelConfigGeneration
+    }
+    @Synchronized fun finishModelCheck(generation: Long, state: ConnectionState, message: String) {
+        if (generation == modelConfigGeneration) saveModelConnection(ModelConnection(state, message, System.currentTimeMillis()))
+    }
+    @Synchronized fun recordModelResponse(success: Boolean, message: String) {
+        if (_modelConnection.value.state != ConnectionState.CHECKING) saveModelConnection(ModelConnection(
+            if (success) ConnectionState.CONNECTED else ConnectionState.FAILED, message, System.currentTimeMillis()))
+    }
+    @Synchronized private fun saveModelConnection(value: ModelConnection) {
+        prefs.edit().putString("modelConnection", ruleJson.encodeToString(value)).apply()
+        _modelConnection.value = value
+    }
+    fun reportDetection(pkg: String, message: String) {
+        detection.value = LogEntry(System.currentTimeMillis(), pkg, message)
+        log(pkg, message)
     }
     @Synchronized fun log(pkg: String, message: String) {
         val entries = (listOf(LogEntry(System.currentTimeMillis(), pkg, message)) + _logs.value).take(150)
