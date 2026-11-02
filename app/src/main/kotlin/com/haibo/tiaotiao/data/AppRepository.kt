@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 
 @Serializable
 data class AppSettings(
@@ -22,7 +24,7 @@ data class AppSettings(
     val smartDamai: Boolean = true,
     val visionModel: String = "google/gemini-2.5-flash-lite",
 )
-@Serializable data class LogEntry(val at: Long, val packageName: String, val message: String)
+@Serializable data class LogEntry(val at: Long, val packageName: String, val message: String, val id: String = UUID.randomUUID().toString())
 @Serializable data class StoredSample(val ruleId: String, val source: String, val screen: ScreenSnapshot)
 @Serializable enum class ConnectionState { UNTESTED, CHECKING, CONNECTED, FAILED }
 @Serializable data class ModelConnection(
@@ -90,6 +92,15 @@ class AppRepository(private val context: Context) {
     val rules = _rules.asStateFlow()
     private val _logs = MutableStateFlow(runCatching { ruleJson.decodeFromString<List<LogEntry>>(String(logsFile.readFully(), Charsets.UTF_8)) }.getOrDefault(emptyList()))
     val logs = _logs.asStateFlow()
+    private val logWrites=Channel<List<LogEntry>>(Channel.CONFLATED)
+    init {
+        CoroutineScope(SupervisorJob()+Dispatchers.IO).launch {
+            for(entries in logWrites) {
+                runCatching {write(logsFile,ruleJson.encodeToString(entries))}
+                    .onFailure {android.util.Log.w("TiaoTiao","Diagnostic log could not be saved: ${it.javaClass.simpleName}")}
+            }
+        }
+    }
     val connected = MutableStateFlow(false)
     val sampleCount = MutableStateFlow(samplesDir.listFiles()?.size ?: 0)
 
@@ -125,10 +136,10 @@ class AppRepository(private val context: Context) {
     }
     @Synchronized fun log(pkg: String, message: String) {
         val entries = (listOf(LogEntry(System.currentTimeMillis(), pkg, message)) + _logs.value).take(150)
-        write(logsFile, ruleJson.encodeToString(entries))
         _logs.value = entries
+        logWrites.trySend(entries)
     }
-    @Synchronized fun clearLogs() { write(logsFile, "[]"); _logs.value = emptyList() }
+    @Synchronized fun clearLogs() { _logs.value = emptyList();logWrites.trySend(emptyList()) }
     @Synchronized fun put(rule: SkipRule) {
         RuleCodec.validate(rule)
         val next = _rules.value.filterNot { it.id == rule.id } + rule

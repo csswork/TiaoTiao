@@ -46,6 +46,15 @@ class SkipAccessibilityService : AccessibilityService() {
     private var targetEventAt = 0L
     private var lastReadState = "尚未读取界面"
     private var smartPilot: SmartPilot? = null
+    @Volatile var diagnosticTreeReads=0L
+        private set
+    private var ignoredDashboardEvents=0L
+    private fun dashboardVisible()=(application as TiaoApplication).foregroundScreen==TiaoApplication.ForegroundScreen.DASHBOARD
+    private fun stopDashboardScan() {
+        scanJob?.cancel();gate.observe(null,SystemClock.elapsedRealtime());hideOverlay()
+        targetEventPackage=null;eventWindowId=null
+        lastReadState="管理界面不参与广告识别"
+    }
     private fun visualDemo(screen: ScreenSnapshot) = screen.packageName == packageName &&
         screen.nodes.any { it.resourceId.endsWith(":id/smart_demo_ad") }
     private fun pilot() = smartPilot ?: SmartPilot(this,
@@ -81,6 +90,11 @@ class SkipAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null || !repository.settings.value.enabled) return
         val eventPackage = event.packageName?.toString().orEmpty()
+        if(eventPackage==packageName && dashboardVisible()) {
+            ignoredDashboardEvents++
+            stopDashboardScan()
+            return
+        }
         if (eventPackage in repository.settings.value.packages) {
             targetEventPackage = eventPackage
             targetEventAt = SystemClock.elapsedRealtime()
@@ -106,9 +120,12 @@ class SkipAccessibilityService : AccessibilityService() {
                 }
             }
         }
+        if(eventPackage.isNotBlank() && eventPackage!=packageName && eventPackage !in repository.settings.value.packages &&
+            event.eventType!=AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && targetEventPackage==null) return
         scheduleScan()
     }
     private fun scheduleScan() {
+        if(dashboardVisible() && targetEventPackage==null) return
         if (scanJob?.isActive == true) return
         scanJob = scope.launch {
             // Retry temporarily missing roots/content even if the OEM sends no further content event.
@@ -160,6 +177,11 @@ class SkipAccessibilityService : AccessibilityService() {
             return null
         }
         val pkg = root.packageName?.toString().orEmpty()
+        if(pkg==packageName && (application as TiaoApplication).foregroundScreen!=TiaoApplication.ForegroundScreen.DEMO) {
+            @Suppress("DEPRECATION") root.recycle()
+            if(dashboardVisible()) stopDashboardScan()
+            return null
+        }
         val belongsToApplication = availableWindows.any { it.id == root.windowId && it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
         if (belongsToApplication) {
             val oldPackage = gate.packageName
@@ -183,6 +205,7 @@ class SkipAccessibilityService : AccessibilityService() {
         }
         val metrics = resources.displayMetrics
         val limit=if (pkg=="cn.damai" && repository.settings.value.smartDamai) 40 else 300
+        diagnosticTreeReads++
         return ScreenReader.read(root, version, metrics.widthPixels, metrics.heightPixels,limit).also {
             lastReadState = "已读取 ${it.screen.nodes.size} 个节点，界面完整=${it.screen.complete}"
         }
@@ -415,6 +438,7 @@ class SkipAccessibilityService : AccessibilityService() {
         writer.println("enabled=${repository.settings.value.enabled}, scanning=${scanJob?.isActive == true}, session=${gate.generation}, dispatched=${gate.actionDispatched}")
         writer.println("sessionPackage=${gate.packageName}, eventPackage=$targetEventPackage, eventWindow=$eventWindowId")
         writer.println("lastRead=$lastReadState")
+        writer.println("treeReads=$diagnosticTreeReads, ignoredDashboardEvents=$ignoredDashboardEvents")
         smartPilot?.let { writer.println(it.summary()) }
         windows.forEach { writer.println("window=${it.id}, type=${it.type}, focused=${it.isFocused}, active=${it.isActive}") }
     }

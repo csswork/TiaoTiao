@@ -1,0 +1,74 @@
+[
+  {
+    "page": "首页",
+    "detectionEnabled": false,
+    "frames": 175,
+    "serviceConnected": true,
+    "p50Ms": 42.980024,
+    "p95Ms": 62.607872,
+    "p99Ms": 75.151281,
+    "overDeadline": 26,
+    "over50ms": 42,
+    "logCountDelta": 0
+  },
+  {
+    "page": "规则",
+    "detectionEnabled": false,
+    "frames": 174,
+    "serviceConnected": true,
+    "p50Ms": 17.512731,
+    "p95Ms": 66.836062,
+    "p99Ms": 126.42375,
+    "overDeadline": 15,
+    "over50ms": 18,
+    "logCountDelta": 0
+  },
+  {
+    "page": "记录",
+    "detectionEnabled": false,
+    "frames": 182,
+    "serviceConnected": true,
+    "p50Ms": 17.262093,
+    "p95Ms": 53.665642,
+    "p99Ms": 66.428893,
+    "overDeadline": 12,
+    "over50ms": 12,
+    "logCountDelta": 0
+  },
+  {
+    "page": "首页",
+    "detectionEnabled": true,
+    "frames": 128,
+    "serviceConnected": true,
+    "p50Ms": 17.85746,
+    "p95Ms": 72.259183,
+    "p99Ms": 111.314392,
+    "overDeadline": 39,
+    "over50ms": 30,
+    "logCountDelta": 0
+  },
+  {
+    "page": "规则",
+    "detectionEnabled": true,
+    "frames": 137,
+    "serviceConnected": true,
+    "p50Ms": 17.84512,
+    "p95Ms": 67.050366,
+    "p99Ms": 83.814908,
+    "overDeadline": 37,
+    "over50ms": 22,
+    "logCountDelta": 0
+  },
+  {
+    "page": "记录",
+    "detectionEnabled": true,
+    "frames": 124,
+    "serviceConnected": true,
+    "p50Ms": 17.211621,
+    "p95Ms": 50.582546,
+    "p99Ms": 52.66464,
+    "overDeadline": 27,
+    "over50ms": 15,
+    "logCountDelta": 0
+  }
+]
