@@ -207,6 +207,8 @@ class RuleUiFlowTest {
     }
     private fun click(text: String) {
         waitUntil {find(text)!=null}
+        instrumentation.waitForIdleSync()
+        runCatching {automation.waitForIdle(100,1500)}
         var node=requireNotNull(find(text))
         repeat(6) {
             if(node.isClickable) {assertTrue(node.performAction(AccessibilityNodeInfo.ACTION_CLICK));return}
@@ -280,7 +282,7 @@ class RuleUiFlowTest {
         canvas.drawText("Small sizes",416f,414f,paint)
         listOf(24,48,72).forEachIndexed {i,size -> tile(canvas,416+i*116,460,size)}
         paint.textSize=17f
-        canvas.drawText("Flat double leap  /  QingIcon Line interface icons",72f,602f,paint)
+        canvas.drawText("Deployed rising tt  /  QingIcon Line interface icons",72f,602f,paint)
         save(board,"tiaotiao-brand-board")
     }
     private fun screenshot(name: String) {

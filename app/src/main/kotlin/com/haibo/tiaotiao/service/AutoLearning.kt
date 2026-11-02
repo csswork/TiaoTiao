@@ -99,7 +99,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
                 repository.reportDetection(screen.packageName,"已自动记录未点击广告的显示时长，用于排除自然结束")
                 return
             }
-            if (adScene==null && frame.signals.advertisement) { adScene=AdRecognition.scene(screen);adSeenAt=frame.at }
+            if (adSeenAt==0L && frame.signals.advertisement) adSeenAt=frame.at
             val signals="ad=${frame.signals.advertisement},skip=${frame.signals.skips.size},home=${frame.signals.home},timer=${frame.signals.countdown}"
             if (lastSignals!=signals) {
                 lastSignals=signals;repository.reportDetection(screen.packageName,"端侧 AI 已读取画面：广告标志=${frame.signals.advertisement}，跳过目标=${frame.signals.skips.size}，首页=${frame.signals.home}")
@@ -122,6 +122,10 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     targetHash=frame.patch(skip),label="skip",source="bundled-ocr-demo",createdAt=System.currentTimeMillis())
                 repository.putVisual(rule)
             }
+            if(rule!=null && adScene!=rule.behavior()) {
+                if(adScene!=null || adSeenAt==0L) adSeenAt=frame.at
+                adScene=rule.behavior()
+            }
             if (rule != null && (skip==null || stable || rule.nodeTarget?.let {AdRecognition.matchesNode(it,screen)}==true) && SystemClock.elapsedRealtime()-frame.at<1200) {
                 if(repository.rules.value.any {it.packageName==screen.packageName && it.versionCode==screen.versionCode &&
                     it.status==RuleStatus.DISABLED && it.target.bounds.near(rule.target)}) {
@@ -132,9 +136,8 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     if(!reported) {reported=true;repository.reportDetection(screen.packageName,"Jev 候选已缓存；自动尝试及独立结果复核需要 Vercel 视觉服务")}
                     return
                 }
-                val baseline=repository.visualBaseline(AdRecognition.scene(screen))
+                val baseline=repository.visualBaseline(rule.behavior())
                 if (!demo(screen) && frame.signals.countdown==null && baseline==0L && rule.evidence.any { it.timingBasis=="unknown" }) {
-                    if (adScene==null) { adScene=AdRecognition.scene(screen);adSeenAt=frame.at }
                     return // Observe one natural ending; do not infer causality from a disappearing page alone.
                 }
                 attempts=true

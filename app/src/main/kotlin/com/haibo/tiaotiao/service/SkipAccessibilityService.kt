@@ -188,6 +188,10 @@ class SkipAccessibilityService : AccessibilityService() {
                 try {root?.packageName?.toString()} finally {@Suppress("DEPRECATION") root?.recycle()}
             }} catch(c: CancellationException) {throw c} catch(_: Exception) {null} ?: return@launch
             if(ownerRevision!=revision || selectedWindow(windows)?.id!=window.id) return@launch
+            if(knownOwner?.second!=owner) {
+                autoLearning?.leaving(owner);scanJob?.cancel();nodeRead?.cancel()
+                clearNodes();cachedVersion=null;nextNodeRead=0
+            }
             knownOwner=window.id to owner
             if(owner!=packageName && owner !in repository.settings.value.packages) {
                 autoLearning?.leaving(owner);gate.observeWindow(owner,true,SystemClock.elapsedRealtime())

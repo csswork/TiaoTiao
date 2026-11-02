@@ -62,7 +62,7 @@ class FixtureActivity : Activity() {
         setContentView(root)
         root.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
     }
-    /** No accessible controls and no words saying advertisement or skip. */
+    /** No accessible controls, advertisement/skip labels, or visible countdown. */
     private inner class ImageAdvertisement : View(this@FixtureActivity) {
         private var remaining=8
         private var showing=true
@@ -80,7 +80,6 @@ class FixtureActivity : Activity() {
                 paint.color=Color.WHITE;paint.strokeWidth=7f
                 c.drawLine(width*.88f,height*.05f,width*.93f,height*.09f,paint)
                 c.drawLine(width*.93f,height*.05f,width*.88f,height*.09f,paint)
-                paint.textSize=52f;c.drawText("${remaining}秒",width*.7f,height*.08f,paint)
             } else {
                 paint.color=Color.BLACK;paint.textSize=64f
                 c.drawText("首页",width*.13f,height*.9f,paint);c.drawText("我的",width*.7f,height*.9f,paint)

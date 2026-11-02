@@ -97,6 +97,7 @@ class UniversalLearningFlowTest {
         await("旧服务停止") {SkipAccessibilityService.instance==null}
         app.visualLearner.close()
         context.getSharedPreferences("visual_cache",android.content.Context.MODE_PRIVATE).edit().clear().commit()
+        context.getSharedPreferences("visual_baselines",android.content.Context.MODE_PRIVATE).edit().clear().commit()
         app.visualLearner=VisualLearner(context,repository,{JevClient(jevHttp)},{VisualClient(visionHttp)})
         app.visualLearner.clearPending()
         listOf(alpha,beta).forEach {shell("run-as $it rm -f files/clicks")}
@@ -145,12 +146,20 @@ class UniversalLearningFlowTest {
             val beforeImages=recognitions.get();val beforeNodes=calls[beta]?.get()
             open(beta,canvas=true)
             await("无广告和跳过文字的纯图像关闭") {clicks(beta)==2}
-            await("图像方案自动检查") {repository.visualRules.value.any {it.packageName==beta && it.successfulSessions()==1}}
+            await("无倒计时的首次检查保留候选") {repository.visualRules.value.any {it.packageName==beta && it.evidence.any {proof -> proof.timingBasis=="unknown"}}}
+            val imageRule=repository.visualRules.value.first {it.packageName==beta}
+            assertEquals("页面消失不能单独证明提前关闭",0,imageRule.successfulSessions())
             assertTrue(recognitions.get()>beforeImages)
             assertEquals("没有控件时不向 Jev 编造目标",beforeNodes,calls[beta]?.get())
             val cachedImageCalls=recognitions.get()
             leave();open(beta,canvas=true)
+            await("无倒计时场景自动观察自然结束") {repository.visualBaseline(imageRule.behavior())>0}
+            assertEquals("建立基线时不点击",2,clicks(beta))
+            leave();open(beta,canvas=true)
             await("纯图像广告复用缓存") {clicks(beta)==3}
+            await("图像方案自动检查") {repository.visualRules.value.any {it.packageName==beta && it.successfulSessions()==1}}
+            leave();open(beta,canvas=true)
+            await("纯图像广告再次复用") {clicks(beta)==4}
             await("纯图像方案跨会话启用") {repository.visualRules.value.any {it.packageName==beta && it.active()}}
             assertEquals("已知图像目标不应重复识别",cachedImageCalls,recognitions.get())
         } finally {
