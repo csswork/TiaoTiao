@@ -80,7 +80,10 @@ private fun position(area: Area): String {
                 Text(appName(item.packageName),style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold)
                 Text(item.status,color=if(item.verified) Color(0xFF276751) else Color(0xFF776143),style=MaterialTheme.typography.labelLarge)
                 Text("${item.action} · ${position(item.target)}",style=MaterialTheme.typography.bodyMedium)
-                Text("查看点击位置与处理进度 ›",style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.primary)
+                Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(4.dp)) {
+                    Text("查看点击位置与处理进度",style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.primary)
+                    QingIcon(QingGlyph.CHEVRON_RIGHT,size=20.dp,tint=MaterialTheme.colorScheme.primary)
+                }
             }
         }
     }
@@ -155,7 +158,10 @@ private fun position(area: Area): String {
                 OutlinedButton(onClick={ scope.launch {
                     playing=true
                     try { progress.snapTo(0f);progress.animateTo(1f,tween(1000)) } finally { playing=false }
-                } },enabled=!playing,modifier=Modifier.fillMaxWidth()) { Text(if(playing) "正在演示…" else "播放点击演示") }
+                } },enabled=!playing,modifier=Modifier.fillMaxWidth()) {
+                    QingIcon(QingGlyph.PLAY,size=20.dp);Spacer(Modifier.width(8.dp))
+                    Text(if(playing) "正在演示…" else "播放点击演示")
+                }
                 Text("演示只在此图中播放，不会操作其他应用。",style=MaterialTheme.typography.bodySmall,color=Color.Gray)
             }
         }
@@ -211,7 +217,7 @@ private fun position(area: Area): String {
 
 @Composable private fun ProgressStep(label: String, complete: Boolean) {
     Row(horizontalArrangement=Arrangement.spacedBy(10.dp),verticalAlignment=Alignment.CenterVertically) {
-        Text(if(complete) "●" else "○",color=MaterialTheme.colorScheme.primary)
+        QingIcon(if(complete) QingGlyph.CHECK_CIRCLE else QingGlyph.PENDING_CIRCLE,size=20.dp,tint=MaterialTheme.colorScheme.primary)
         Text(label,style=MaterialTheme.typography.bodyMedium)
     }
 }

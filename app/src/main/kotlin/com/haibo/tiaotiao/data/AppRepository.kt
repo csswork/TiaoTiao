@@ -12,6 +12,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class AppSettings(
     val enabled: Boolean = false,
@@ -21,7 +22,7 @@ data class AppSettings(
     val jevProvider: JevProvider = JevProvider.TYPE_SAFE,
     val syncUrl: String = "",
     val syncEtag: String = "",
-    val smartDamai: Boolean = true,
+    @kotlinx.serialization.json.JsonNames("smartDamai") val automaticLearning: Boolean = true,
     val visionModel: String = "google/gemini-2.5-flash-lite",
 )
 @Serializable data class LogEntry(val at: Long, val packageName: String, val message: String, val id: String = UUID.randomUUID().toString())
@@ -57,9 +58,15 @@ class AppRepository(private val context: Context) {
     @Synchronized fun putVisual(rule: VisualRule) {
         VisualPolicy.validate(rule)
         val next = _visualRules.value.filterNot { it.id == rule.id } + rule
-        require(next.size <= 100)
+        require(next.size <= VisualPolicy.MAX_RULES) {"智能规则已达上限，请清理后重试"}
         write(visualFile, ruleJson.encodeToString(VisualBundle(rules = next)))
         _visualRules.value = next
+    }
+    @Synchronized fun updateVisual(id: String, behavior: String, transform: (VisualRule) -> VisualRule?): VisualRule? {
+        val current=_visualRules.value.find {it.id==id && it.behavior()==behavior} ?: return null
+        val updated=transform(current) ?: return null
+        putVisual(updated)
+        return updated
     }
     @Synchronized fun removeVisual(id: String) {
         val next = _visualRules.value.filterNot { it.id == id }
@@ -109,6 +116,22 @@ class AppRepository(private val context: Context) {
         if (updated.jevProvider != _settings.value.jevProvider || updated.model != _settings.value.model) invalidateModelConnection()
         prefs.edit().putString("settings", ruleJson.encodeToString(updated)).apply()
         _settings.value = updated
+    }
+    /** Keep provider/model and its credential atomic while asynchronous analysis is running. */
+    @Synchronized fun configureAi(provider: JevProvider, model: String, key: String) {
+        provider.validateModel(model)
+        if(key.isNotBlank()) vault.set("jevKey",key)
+        updateSettings {it.copy(jevProvider=provider,model=model)}
+        invalidateModelConnection()
+    }
+    @Synchronized fun analysisKey(provider: JevProvider, model: String, vision: Boolean=false): String? {
+        val s=_settings.value
+        if(!s.enabled || !s.automaticLearning || !s.cloudEnabled || s.jevProvider!=provider ||
+            (if(vision) s.visionModel else s.model)!=model) return null
+        return vault.get("jevKey").takeIf {it.isNotBlank()}
+    }
+    @Synchronized fun clearAiCredentials() {
+        vault.set("jevKey","");updateSettings {it.copy(cloudEnabled=false)};invalidateModelConnection()
     }
     @Synchronized fun invalidateModelConnection() {
         modelConfigGeneration++

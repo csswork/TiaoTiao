@@ -6,8 +6,8 @@ import com.haibo.tiaotiao.core.*
 import kotlinx.coroutines.*
 import java.util.UUID
 
-/** The automatic experiment is explicitly scoped to Damai and this app's synthetic visual demo. */
-class SmartPilot(private val service: SkipAccessibilityService,
+/** One bounded startup-learning pipeline for every selected application. */
+class AutoLearning(private val service: SkipAccessibilityService,
     private val currentWindow: () -> ScreenSnapshot?,
     private val current: () -> ScreenSnapshot?, private val open: (Long,String) -> Boolean,
     private val tap: suspend (Long,ScreenSnapshot,Area) -> Boolean) {
@@ -18,6 +18,7 @@ class SmartPilot(private val service: SkipAccessibilityService,
     private var session = ""
     private var nextCapture = 0L
     private var queued = 0
+    private var nodeQueued=0
     private var nextLearnAt = 0L
     private var previousSkip: Area? = null
     private var attempts = false
@@ -32,9 +33,10 @@ class SmartPilot(private val service: SkipAccessibilityService,
     private var lastSignals = ""
     private val homeArea = Area(0f,.88f,1f,.98f)
     private fun pause(rule: VisualRule, message: String) {
-        val current=repository.visualRules.value.find { it.id==rule.id && it.behavior()==rule.behavior() } ?: return
-        if (current.state==VisualRuleState.PAUSED && current.lastResult.startsWith("用户")) return
-        repository.putVisual(current.copy(state=VisualRuleState.PAUSED,automaticFailures=(current.automaticFailures+1).coerceAtMost(100),lastResult=message))
+        repository.updateVisual(rule.id,rule.behavior()) {current ->
+            if(current.state==VisualRuleState.PAUSED && current.lastResult.startsWith("用户")) null else
+                current.copy(state=VisualRuleState.PAUSED,automaticFailures=(current.automaticFailures+1).coerceAtMost(100),lastResult=message)
+        }
     }
     fun summary() = "visual generation=$generation, captures=$captures, stage=$stage, signals=$lastSignals, adScene=$adScene, baselineDone=$baselineDone, queued=$queued"
     fun leaving(owner: String) {
@@ -46,28 +48,41 @@ class SmartPilot(private val service: SkipAccessibilityService,
         } else repository.reportDetection(rule.packageName,"结果检查期间离开应用，本次不计为验证成功")
         pendingRule=null
     }
-    fun demo(screen: ScreenSnapshot) = screen.packageName==service.packageName && screen.nodes.any { it.resourceId.endsWith(":id/smart_demo_ad") }
-    fun eligible(screen: ScreenSnapshot) = demo(screen) || (screen.packageName=="cn.damai" && repository.settings.value.smartDamai)
-    suspend fun scan(screen: ScreenSnapshot, gen: Long) {
+    fun demo(screen: ScreenSnapshot) = screen.packageName==service.packageName &&
+        (app.foregroundScreen==TiaoApplication.ForegroundScreen.VISUAL_DEMO || screen.nodes.any { it.resourceId.endsWith(":id/smart_demo_ad") })
+    fun eligible(screen: ScreenSnapshot) = demo(screen) || AdRecognition.eligible(screen.packageName,repository.settings.value.packages,service.packageName,repository.settings.value.automaticLearning)
+    private fun begin(gen: Long) {
         if (gen != generation) {
-            generation=gen;session=UUID.randomUUID().toString();nextCapture=0;queued=0;nextLearnAt=0;previousSkip=null;attempts=false;reported=false
+            generation=gen;session=UUID.randomUUID().toString();nextCapture=0;queued=0;nodeQueued=0;nextLearnAt=0;previousSkip=null;attempts=false;reported=false
             adScene=null;adSeenAt=0;baselineDone=false
             captures=0;stage="starting";lastSignals="";pendingRule=null
         }
+    }
+    fun warmUp() = capture.warmUp()
+    fun inspectNodes(screen: ScreenSnapshot,gen: Long,force: Boolean=false) {
+        begin(gen)
+        if(queued>=3 || nodeQueued>=2 || !eligible(screen) || !open(gen,screen.packageName)) return
+        if(!force && repository.visualRules.value.any { AdRecognition.matchesScene(it,screen) && it.state!=VisualRuleState.PAUSED && !it.awaitingLocalReview }) return
+        if(app.visualLearner.inspectNodes(screen)) {queued++;nodeQueued++;nextLearnAt=SystemClock.elapsedRealtime()+600}
+    }
+    suspend fun scan(initial: ScreenSnapshot, gen: Long) {
+        var screen=initial
+        begin(gen)
+        if(!eligible(screen)) return
         if (attempts || SystemClock.elapsedRealtime()<nextCapture || !open(gen,screen.packageName)) return
         nextCapture=SystemClock.elapsedRealtime()+550
-        val observingBaseline = adScene!=null && !attempts && !baselineDone && screen.fingerprint()!=adScene
-        if ((!screen.complete && !observingBaseline) || (!demo(screen) && screen.nodes.size>40 && !observingBaseline)) { stage="skip-large-or-incomplete-${screen.nodes.size}";return }
-        val cloudReady = app.visualLearner.allowed(screen.packageName)
-        val hasActive = repository.visualRules.value.any { it.packageName==screen.packageName && it.versionCode==screen.versionCode && it.scene==screen.fingerprint() && it.active() }
-        if (!demo(screen) && !cloudReady && !hasActive) {
-            if (!reported) { reported=true;repository.reportDetection(screen.packageName,"大麦智能学习需要开启云端分析并使用 Vercel 网关；可在首页配置") }
+        val observingBaseline = adScene!=null && !attempts && !baselineDone
+        val nodeReady = app.visualLearner.nodeAllowed(screen.packageName) && repository.vault.contains("jevKey")
+        val cloudReady = nodeReady && app.visualLearner.allowed(screen.packageName)
+        val hasActive = repository.visualRules.value.any { AdRecognition.matchesScene(it,screen) && it.active() }
+        if (!demo(screen) && !nodeReady && !hasActive) {
+            if (!reported) { reported=true;repository.reportDetection(screen.packageName,"新界面自动学习需要配置密钥并开启云端分析；已验证规则仍可本地复用") }
             return
         }
         stage="capturing"
         val frame = try { capture.capture(screen) } catch (c: CancellationException) { throw c }
         catch (e: Exception) {
-            val reason=e.message?.takeIf { it.matches(Regex("截图不可用（\\d+）")) || it=="窗口比例变化，暂不使用截图坐标" } ?: e.javaClass.simpleName
+            val reason=e.message?.takeIf { it.matches(Regex("截图不可用（\\d+）")) || it=="截图请求超时" || it=="窗口比例变化，暂不使用截图坐标" } ?: e.javaClass.simpleName
             if (stage!="error-$reason") repository.reportDetection(screen.packageName,"截图或端侧识别不可用：$reason；当前未执行点击")
             stage="error-$reason"
             return
@@ -76,14 +91,15 @@ class SmartPilot(private val service: SkipAccessibilityService,
             captures++
             if (!open(gen,screen.packageName)) return
             val fresh = current() ?: return
-            if (fresh.packageName!=screen.packageName || fresh.windowId!=screen.windowId || (!observingBaseline && fresh.fingerprint()!=screen.fingerprint())) {stage="stale-screen";return}
+            if (fresh.packageName!=screen.packageName || fresh.windowId!=screen.windowId || AdRecognition.scene(fresh)!=AdRecognition.scene(screen)) {stage="stale-screen";return}
+            if(fresh.nodes.isNotEmpty()) screen=fresh
             if (observingBaseline && frame.signals.home && frame.signals.skips.isEmpty()) {
                 val scene=adScene ?: return
                 repository.recordVisualBaseline(scene,frame.at-adSeenAt);baselineDone=true
                 repository.reportDetection(screen.packageName,"已自动记录未点击广告的显示时长，用于排除自然结束")
                 return
             }
-            if (adScene==null && frame.signals.advertisement) { adScene=screen.fingerprint();adSeenAt=frame.at }
+            if (adScene==null && frame.signals.advertisement) { adScene=AdRecognition.scene(screen);adSeenAt=frame.at }
             val signals="ad=${frame.signals.advertisement},skip=${frame.signals.skips.size},home=${frame.signals.home},timer=${frame.signals.countdown}"
             if (lastSignals!=signals) {
                 lastSignals=signals;repository.reportDetection(screen.packageName,"端侧 AI 已读取画面：广告标志=${frame.signals.advertisement}，跳过目标=${frame.signals.skips.size}，首页=${frame.signals.home}")
@@ -92,21 +108,33 @@ class SmartPilot(private val service: SkipAccessibilityService,
             val skip = frame.signals.skips.singleOrNull()
             val stable = skip != null && previousSkip?.near(skip)==true
             previousSkip=skip
-            val matches = repository.visualRules.value.filter { it.packageName==screen.packageName && it.scene==screen.fingerprint() && it.state!=VisualRuleState.PAUSED }
-                .filter { it.active() || cloudReady || demo(screen) }
-                .filter { VisualPolicy.canAttempt(it,screen,frame.signals,frame.patch(it.target)) }
+            val matches = repository.visualRules.value.filter { AdRecognition.matchesScene(it,screen) && it.state!=VisualRuleState.PAUSED }
+                .filter { it.active() || nodeReady || demo(screen) }
+                .filter { VisualPolicy.canAttempt(it,screen,frame.signals,
+                    if(it.targetHash.count {bit -> bit=='1'} in 4..60) frame.targetPatch(it.target) else "",
+                    frame.patch(Area(.05f,.12f,.95f,.88f))) }
             val paths=matches.map { VisualPolicy.clickableTarget(screen,frame.signals.skips.singleOrNull { a -> a.near(it.target) } ?: it.target)?.path }
             var rule=matches.singleOrNull() ?: matches.takeIf { paths.isNotEmpty() && paths.all { it!=null } && paths.distinct().size==1 }
                 ?.maxByOrNull { it.successfulSessions() }
+            if(rule==null && matches.isNotEmpty() && matches.all {it.target.near(matches.first().target)}) rule=matches.maxByOrNull {it.successfulSessions()}
             if (demo(screen) && rule==null && skip!=null && stable && frame.signals.advertisement) {
-                rule=VisualRule(packageName=screen.packageName,versionCode=screen.versionCode,scene=screen.fingerprint(),target=skip,
+                rule=VisualRule(packageName=screen.packageName,versionCode=screen.versionCode,scene=AdRecognition.scene(screen),sceneVersion=2,target=skip,
                     targetHash=frame.patch(skip),label="skip",source="bundled-ocr-demo",createdAt=System.currentTimeMillis())
                 repository.putVisual(rule)
             }
-            if (rule != null && (skip==null || stable) && SystemClock.elapsedRealtime()-frame.at<1200) {
-                val baseline=repository.visualBaseline(screen.fingerprint())
-                if (!demo(screen) && frame.signals.countdown==null && baseline==0L) {
-                    if (adScene==null) { adScene=screen.fingerprint();adSeenAt=frame.at }
+            if (rule != null && (skip==null || stable || rule.nodeTarget?.let {AdRecognition.matchesNode(it,screen)}==true) && SystemClock.elapsedRealtime()-frame.at<1200) {
+                if(repository.rules.value.any {it.packageName==screen.packageName && it.versionCode==screen.versionCode &&
+                    it.status==RuleStatus.DISABLED && it.target.bounds.near(rule.target)}) {
+                    repository.reportDetection(screen.packageName,"当前目标已有用户停用记录，未自动点击")
+                    return
+                }
+                if(!rule.active() && !cloudReady && !demo(screen)) {
+                    if(!reported) {reported=true;repository.reportDetection(screen.packageName,"Jev 候选已缓存；自动尝试及独立结果复核需要 Vercel 视觉服务")}
+                    return
+                }
+                val baseline=repository.visualBaseline(AdRecognition.scene(screen))
+                if (!demo(screen) && frame.signals.countdown==null && baseline==0L && rule.evidence.any { it.timingBasis=="unknown" }) {
+                    if (adScene==null) { adScene=AdRecognition.scene(screen);adSeenAt=frame.at }
                     return // Observe one natural ending; do not infer causality from a disappearing page alone.
                 }
                 attempts=true
@@ -128,6 +156,8 @@ class SmartPilot(private val service: SkipAccessibilityService,
                         if (snapshot.packageName!=screen.packageName) break
                         val observed=try { capture.capture(snapshot) } catch (c: CancellationException) { throw c }
                             catch (_: Exception) { continue }
+                        val owner=currentWindow()
+                        if(owner==null || owner.packageName!=snapshot.packageName || owner.windowId!=snapshot.windowId) {observed.close();break}
                         if (frame.difference(observed)>.04 && observed.signals.skips.isEmpty()) {
                             afterFrames+=observed
                             if (afterFrames.size==2) break
@@ -160,11 +190,20 @@ class SmartPilot(private val service: SkipAccessibilityService,
                         repository.reportDetection(screen.packageName,"已观察到连续页面变化，AI 正在自动复核结果")
                         val homeScene=after2.screen.fingerprint().takeIf { after2.screen.complete && it!=screen.fingerprint() }.orEmpty()
                         app.visualLearner.verify(chosen,session,listOf(frame.jpeg,after1.jpeg,after2.jpeg),early,true,homeScene,homeHash,basis)
+                    } else {
+                        if(chosen.active()) {
+                            pause(chosen,"本地结果证据不足，等待重新识别")
+                            repository.reportDetection(screen.packageName,"已按本地规则关闭，但结果证据不足且云端未就绪，暂时停止自动复用")
+                        } else repository.reportDetection(screen.packageName,"已观察到页面变化；自动启用仍需独立 AI 结果复核，保留候选")
                     }
                 } finally { afterFrames.forEach { it.close() } }
-            } else if (rule==null && !demo(screen) && !frame.signals.home && queued<2 && SystemClock.elapsedRealtime()>=nextLearnAt) {
-                if (repository.visualRules.value.any { it.packageName==screen.packageName && it.scene==screen.fingerprint() && it.state==VisualRuleState.PAUSED &&
+            } else if (rule==null && !demo(screen) && !frame.signals.home && queued<3 &&
+                (frame.signals.advertisement || AdRecognition.candidates(screen).isNotEmpty() || frame.patch(Area(.1f,.15f,.9f,.8f)).count {it=='1'} in 4..60) &&
+                SystemClock.elapsedRealtime()>=nextLearnAt) {
+                if (repository.visualRules.value.any { AdRecognition.matchesScene(it,screen) && it.state==VisualRuleState.PAUSED &&
                     (it.lastResult.startsWith("用户") || it.automaticFailures>=2) }) return
+                inspectNodes(screen,gen,true)
+                if(queued>=3) return
                 if (app.visualLearner.enqueue(frame)) { queued++;nextLearnAt=SystemClock.elapsedRealtime()+1800 }
             }
         }

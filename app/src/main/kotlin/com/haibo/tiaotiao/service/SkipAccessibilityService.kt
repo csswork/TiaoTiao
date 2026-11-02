@@ -34,7 +34,7 @@ class SkipAccessibilityService : AccessibilityService() {
     private val repository get() = (application as TiaoApplication).repository
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val gate = SessionGate()
-    private val jev = JevClient()
+    private val jev by lazy { JevClient() }
     private var scanJob: Job? = null
     private var overlay: LinearLayout? = null
     private var overlayRuleId: String? = null
@@ -45,28 +45,37 @@ class SkipAccessibilityService : AccessibilityService() {
     private var targetEventPackage: String? = null
     private var targetEventAt = 0L
     private var lastReadState = "尚未读取界面"
-    private var smartPilot: SmartPilot? = null
+    private var autoLearning: AutoLearning? = null
+    private var knownOwner: Pair<Int,String>? = null
+    private var ownerRevision=0L
+    private var ownerProbe: Job?=null
+    private var nodeRead: Job?=null
+    private var nodeSnapshot: ScreenSnapshot?=null
+    private var nodeObservation: Observation?=null
+    private var nodeSnapshotAt=0L
+    private var nextNodeRead=0L
+    private var cachedVersion: Pair<String,Long>?=null
     @Volatile var diagnosticTreeReads=0L
         private set
     private var ignoredDashboardEvents=0L
     private fun dashboardVisible()=(application as TiaoApplication).foregroundScreen==TiaoApplication.ForegroundScreen.DASHBOARD
     private fun stopDashboardScan() {
-        scanJob?.cancel();gate.observe(null,SystemClock.elapsedRealtime());hideOverlay()
+        scanJob?.cancel();nodeRead?.cancel();gate.observe(null,SystemClock.elapsedRealtime());hideOverlay()
         targetEventPackage=null;eventWindowId=null
+        knownOwner=null;ownerRevision++;clearNodes()
         lastReadState="管理界面不参与广告识别"
     }
     private fun visualDemo(screen: ScreenSnapshot) = screen.packageName == packageName &&
-        screen.nodes.any { it.resourceId.endsWith(":id/smart_demo_ad") }
-    private fun pilot() = smartPilot ?: SmartPilot(this,
+        ((application as TiaoApplication).foregroundScreen==TiaoApplication.ForegroundScreen.VISUAL_DEMO || screen.nodes.any { it.resourceId.endsWith(":id/smart_demo_ad") })
+    private fun learning() = autoLearning ?: AutoLearning(this,
         currentWindow = { visualWindow() },
         current = {
             // A just-closed splash window can remain in the accessibility cache; querying its
             // root on the main thread otherwise waits for a framework timeout before seeing home.
-            if (android.os.Build.VERSION.SDK_INT>=33) clearCache()
-            observe()?.use { it.screen }
+            visualWindow()
         },
         open = { generation, pkg -> repository.settings.value.enabled && gate.generation == generation && gate.isOpen(pkg,SystemClock.elapsedRealtime()) },
-        tap = { generation, screen, area -> smartTap(generation,screen,area) }).also { smartPilot = it }
+        tap = { generation, screen, area -> smartTap(generation,screen,area) }).also { autoLearning = it }
     private val reportedReasons = mutableSetOf<String>()
     private fun report(pkg: String, reason: String, message: String) {
         if (diagnosticPackage != pkg) { diagnosticPackage = pkg; reportedReasons.clear() }
@@ -78,19 +87,24 @@ class SkipAccessibilityService : AccessibilityService() {
         repository.connected.value = true
         repository.log("", "无障碍服务已连接")
         (application as TiaoApplication).visualLearner.resume()
+        if(android.os.Build.VERSION.SDK_INT>=30) learning().warmUp()
         scope.launch {
+            var previous: com.haibo.tiaotiao.data.AppSettings?=null
             repository.settings.collectLatest { settings ->
-                scanJob?.cancel()
-                gate.reset()
-                hideOverlay()
-                if (settings.enabled) scheduleScan()
+                val old=previous;previous=settings
+                if(old==null || old.enabled!=settings.enabled || old.automaticLearning!=settings.automaticLearning || old.packages!=settings.packages) {
+                    scanJob?.cancel()
+                    nodeRead?.cancel();clearNodes();nextNodeRead=0;cachedVersion=null
+                    gate.reset();hideOverlay()
+                    if(settings.enabled) scheduleScan()
+                } else if(settings.enabled && targetEventPackage!=null) scheduleScan()
             }
         }
     }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null || !repository.settings.value.enabled) return
         val eventPackage = event.packageName?.toString().orEmpty()
-        if(eventPackage==packageName && dashboardVisible()) {
+        if(dashboardVisible()) {
             ignoredDashboardEvents++
             stopDashboardScan()
             return
@@ -99,6 +113,28 @@ class SkipAccessibilityService : AccessibilityService() {
             targetEventPackage = eventPackage
             targetEventAt = SystemClock.elapsedRealtime()
         }
+        val appWindow=selectedWindow(windows)
+        if(appWindow!=null && appWindow.id==event.windowId && eventPackage.isNotBlank() &&
+            (event.eventType==AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || eventPackage in repository.settings.value.packages ||
+                (eventPackage==packageName && (application as TiaoApplication).foregroundScreen==TiaoApplication.ForegroundScreen.VISUAL_DEMO))) {
+            if(knownOwner!=(appWindow.id to eventPackage)) {
+                if(knownOwner?.second!=eventPackage) {autoLearning?.leaving(eventPackage);scanJob?.cancel()}
+                nodeRead?.cancel();nextNodeRead=0;clearNodes();cachedVersion=null
+            }
+            knownOwner=appWindow.id to eventPackage;ownerRevision++
+            if(eventPackage in repository.settings.value.packages || eventPackage==packageName) {
+                eventWindowId=appWindow.id
+                if(targetEventPackage!=eventPackage) cachedVersion=null
+                targetEventPackage=eventPackage;targetEventAt=SystemClock.elapsedRealtime()
+                gate.observeWindow(eventPackage,true,targetEventAt)
+            } else {
+                autoLearning?.leaving(eventPackage)
+                scanJob?.cancel();gate.observeWindow(eventPackage,true,SystemClock.elapsedRealtime());hideOverlay()
+                targetEventPackage=null;clearNodes();cachedVersion=null
+                diagnosticPackage=null;reportedReasons.clear()
+                return
+            }
+        }
         // Foreground changes must cancel a request immediately rather than waiting for its result.
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val pkg = eventPackage
@@ -106,18 +142,7 @@ class SkipAccessibilityService : AccessibilityService() {
             if (pkg in repository.settings.value.packages) report(pkg, "event", "收到目标应用窗口事件，等待可读取的开屏界面")
             if (pkg.isNotBlank() && pkg != packageName && pkg !in repository.settings.value.packages) {
                 // Toasts/system-owned windows are not proof that the target application left the foreground.
-                val available = windows
-                val appWindow = selectedWindow(available)
-                val root = appWindow?.root
-                val actualPackage = root?.packageName?.toString()
-                @Suppress("DEPRECATION") root?.recycle()
-                if (actualPackage != null && actualPackage != packageName && actualPackage !in repository.settings.value.packages) {
-                    smartPilot?.leaving(actualPackage)
-                    scanJob?.cancel(); gate.observeWindow(actualPackage, true, SystemClock.elapsedRealtime()); hideOverlay()
-                    targetEventPackage = null
-                    diagnosticPackage = null; reportedReasons.clear()
-                    return
-                }
+                probeOwner()
             }
         }
         if(eventPackage.isNotBlank() && eventPackage!=packageName && eventPackage !in repository.settings.value.packages &&
@@ -131,15 +156,14 @@ class SkipAccessibilityService : AccessibilityService() {
             // Retry temporarily missing roots/content even if the OEM sends no further content event.
             // This loop never extends the session or retries a dispatched click.
             val deadline = SystemClock.elapsedRealtime() + 10_000
-            delay(80)
             try {
                 do {
                     scan()
                     val now = SystemClock.elapsedRealtime()
                     val target = targetEventPackage
                     if (target == null || (target !in repository.settings.value.packages && target != packageName) || !repository.settings.value.enabled ||
-                        now >= deadline || now - targetEventAt >= 10_000 || gate.actionDispatched ||
-                        (gate.packageName == target && !gate.isOpen(target, now))) break
+                        now >= deadline || now - targetEventAt >= 10_000 ||
+                        !gate.canAwait(target,now)) break
                     delay(160)
                 } while (isActive)
             }
@@ -151,6 +175,64 @@ class SkipAccessibilityService : AccessibilityService() {
         scanJob?.cancel(); gate.reset(); hideOverlay()
         targetEventPackage = null; eventWindowId = null
         diagnosticPackage = null; reportedReasons.clear()
+        clearNodes();cachedVersion=null;nextNodeRead=0
+    }
+    private fun clearNodes() {nodeObservation?.close();nodeObservation=null;nodeSnapshot=null}
+    private fun probeOwner() {
+        if(ownerProbe?.isActive==true || dashboardVisible()) return
+        val window=selectedWindow(windows) ?: return
+        val revision=ownerRevision
+        ownerProbe=scope.launch {
+            val owner=try {withContext(Dispatchers.IO) {
+                val root=if(android.os.Build.VERSION.SDK_INT>=33) window.getRoot(0) else window.root
+                try {root?.packageName?.toString()} finally {@Suppress("DEPRECATION") root?.recycle()}
+            }} catch(c: CancellationException) {throw c} catch(_: Exception) {null} ?: return@launch
+            if(ownerRevision!=revision || selectedWindow(windows)?.id!=window.id) return@launch
+            knownOwner=window.id to owner
+            if(owner!=packageName && owner !in repository.settings.value.packages) {
+                autoLearning?.leaving(owner);gate.observeWindow(owner,true,SystemClock.elapsedRealtime())
+                scanJob?.cancel();targetEventPackage=null;clearNodes();cachedVersion=null;hideOverlay()
+                diagnosticPackage=null;reportedReasons.clear()
+            } else {
+                gate.observeWindow(owner,true,SystemClock.elapsedRealtime())
+                targetEventPackage=owner;targetEventAt=SystemClock.elapsedRealtime();eventWindowId=window.id
+                scheduleScan()
+            }
+        }
+    }
+    private fun readNodes(screen: ScreenSnapshot) {
+        val now=SystemClock.elapsedRealtime()
+        if(nodeRead?.isActive==true || now<nextNodeRead) return
+        nextNodeRead=now+700
+        val gen=gate.generation
+        nodeRead=scope.launch {
+            var owned: Observation?=null
+            try {
+            withContext(Dispatchers.IO) {
+                val window=windows.firstOrNull {it.id==screen.windowId} ?: return@withContext null
+                val root=(if(android.os.Build.VERSION.SDK_INT>=33) window.getRoot(0) else window.root) ?: return@withContext null
+                if(root.packageName?.toString()!=screen.packageName) {
+                    @Suppress("DEPRECATION") root.recycle();return@withContext null
+                }
+                if(dashboardVisible()) {@Suppress("DEPRECATION") root.recycle();return@withContext null}
+                diagnosticTreeReads++
+                owned=ScreenReader.read(root,screen.versionCode,screen.width,screen.height,160,150)
+            }
+            val observation=owned ?: return@launch
+            val snapshot=observation.screen
+            if(gate.generation!=gen || !gate.isOpen(screen.packageName,SystemClock.elapsedRealtime()) ||
+                selectedWindow(windows)?.id!=screen.windowId || dashboardVisible()) return@launch
+            clearNodes();nodeObservation=observation;owned=null
+            nodeSnapshot=snapshot;nodeSnapshotAt=SystemClock.elapsedRealtime()
+            lastReadState="后台读取 ${snapshot.nodes.size} 个节点，完整=${snapshot.complete}；截图检测独立进行"
+            if(RuleEngine.resolveVerified(repository.rules.value,snapshot)!=VerifiedSceneLookup.Unknown ||
+                repository.rules.value.any {it.packageName==snapshot.packageName && it.versionCode==snapshot.versionCode &&
+                    it.status==RuleStatus.DISABLED && AdRecognition.matchesNode(it.target,snapshot)}) return@launch
+            learning().inspectNodes(snapshot,gen)
+            } catch(c: CancellationException) {throw c}
+            catch(_: Exception) {report(screen.packageName,"node-read-failed","控件暂不可读取，画面识别继续运行")}
+            finally {owned?.close()}
+        }
     }
     private fun selectedWindow(available: List<AccessibilityWindowInfo>): AccessibilityWindowInfo? {
         val id = WindowSelection.choose(available.map {
@@ -177,7 +259,7 @@ class SkipAccessibilityService : AccessibilityService() {
             return null
         }
         val pkg = root.packageName?.toString().orEmpty()
-        if(pkg==packageName && (application as TiaoApplication).foregroundScreen!=TiaoApplication.ForegroundScreen.DEMO) {
+        if(pkg==packageName && (application as TiaoApplication).foregroundScreen !in setOf(TiaoApplication.ForegroundScreen.DEMO,TiaoApplication.ForegroundScreen.VISUAL_DEMO)) {
             @Suppress("DEPRECATION") root.recycle()
             if(dashboardVisible()) stopDashboardScan()
             return null
@@ -204,31 +286,58 @@ class SkipAccessibilityService : AccessibilityService() {
             return null
         }
         val metrics = resources.displayMetrics
-        val limit=if (pkg=="cn.damai" && repository.settings.value.smartDamai) 40 else 300
         diagnosticTreeReads++
-        return ScreenReader.read(root, version, metrics.widthPixels, metrics.heightPixels,limit).also {
+        return ScreenReader.read(root, version, metrics.widthPixels, metrics.heightPixels).also {
             lastReadState = "已读取 ${it.screen.nodes.size} 个节点，界面完整=${it.screen.complete}"
         }
     }
     private fun visualWindow(): ScreenSnapshot? {
         if (!getSystemService(PowerManager::class.java).isInteractive || getSystemService(KeyguardManager::class.java).isKeyguardLocked) return null
-        if (android.os.Build.VERSION.SDK_INT>=33) clearCache()
         val window=selectedWindow(windows) ?: return null
-        val root=(if (android.os.Build.VERSION.SDK_INT>=33) window.getRoot(0) else window.root) ?: return null
-        val pkg=root.packageName?.toString().orEmpty()
-        @Suppress("DEPRECATION") root.recycle()
-        val version=runCatching { @Suppress("DEPRECATION") packageManager.getPackageInfo(pkg,0).let {
+        val pkg=knownOwner?.takeIf {it.first==window.id}?.second ?: run {probeOwner();return null}
+        val version=cachedVersion?.takeIf {it.first==pkg}?.second ?: runCatching { @Suppress("DEPRECATION") packageManager.getPackageInfo(pkg,0).let {
             if (android.os.Build.VERSION.SDK_INT>=28) it.longVersionCode else @Suppress("DEPRECATION") it.versionCode.toLong()
-        } }.getOrNull() ?: return null
+        } }.getOrNull()?.also {cachedVersion=pkg to it} ?: return null
         val m=resources.displayMetrics
+        val nodes=nodeSnapshot?.takeIf {!gate.actionDispatched && it.packageName==pkg && it.versionCode==version && it.windowId==window.id && SystemClock.elapsedRealtime()-nodeSnapshotAt<900}
         // Metadata only: visual verification must not wait for every home-page node/provider.
-        return ScreenSnapshot(pkg,version,m.widthPixels,m.heightPixels,emptyList(),System.currentTimeMillis(),window.id,complete=false)
+        return ScreenSnapshot(pkg,version,m.widthPixels,m.heightPixels,nodes?.nodes.orEmpty(),System.currentTimeMillis(),window.id,complete=nodes?.complete==true)
     }
     private fun isDemo(screen: ScreenSnapshot) = screen.packageName == packageName && screen.nodes.any { it.resourceId.endsWith(":id/demo_skip") }
     private fun eligible(screen: ScreenSnapshot) = (screen.packageName in repository.settings.value.packages && screen.packageName != packageName) || isDemo(screen) || visualDemo(screen)
 
     private suspend fun scan() {
         if (!repository.settings.value.enabled) return
+        if(android.os.Build.VERSION.SDK_INT>=30 && (repository.settings.value.automaticLearning ||
+            (application as TiaoApplication).foregroundScreen==TiaoApplication.ForegroundScreen.VISUAL_DEMO)) {
+            val screen=visualWindow()
+            if(screen!=null && (visualDemo(screen) || AdRecognition.eligible(screen.packageName,repository.settings.value.packages,packageName,repository.settings.value.automaticLearning))) {
+                val now=SystemClock.elapsedRealtime()
+                gate.observe(screen.packageName,now)
+                if(!gate.isOpen(screen.packageName,now)) return
+                report(screen.packageName,"begin","开屏检测已启动：Jev 控件分析与端侧画面识别并行")
+                readNodes(screen)
+                if(repository.rules.value.any {it.packageName==screen.packageName && it.versionCode==screen.versionCode &&
+                    it.status==RuleStatus.DISABLED && AdRecognition.matchesNode(it.target,screen)}) {
+                    report(screen.packageName,"disabled-target","此目标已有用户停用记录，本轮不重新学习或点击")
+                    return
+                }
+                // Existing manually verified rules retain their original stricter matching path.
+                if(screen.complete) when(val local=RuleEngine.resolveVerified(repository.rules.value,screen)) {
+                    is VerifiedSceneLookup.Matched -> {dispatch(local.rule,false);return}
+                    VerifiedSceneLookup.UnmatchedTarget -> return
+                    VerifiedSceneLookup.Unknown -> Unit
+                }
+                learning().scan(screen,gate.generation)
+                return
+            }
+            if(screen==null) {
+                targetEventPackage?.let {report(it,"await-owner","当前窗口尚不可读取，正在继续等待；未执行点击")}
+                return
+            }
+            if(screen.packageName!=packageName ||
+                (application as TiaoApplication).foregroundScreen!=TiaoApplication.ForegroundScreen.DEMO) return
+        }
         val observation = observe()
         if (observation == null) {
             // A transient null root during a successful page transition must not discard the result question.
@@ -250,10 +359,9 @@ class SkipAccessibilityService : AccessibilityService() {
             return
         }
         report(screen.packageName, "begin", "开始检测开屏界面")
-        if (android.os.Build.VERSION.SDK_INT >= 30 && (visualDemo(screen) ||
-            (screen.packageName == "cn.damai" && repository.settings.value.smartDamai))) {
+        if (android.os.Build.VERSION.SDK_INT >= 30 && visualDemo(screen)) {
             if (visualDemo(screen)) { targetEventPackage = packageName; targetEventAt = now }
-            pilot().scan(screen,gate.generation)
+            learning().scan(screen,gate.generation)
             return
         }
         val fingerprint = screen.fingerprint()
@@ -348,19 +456,23 @@ class SkipAccessibilityService : AccessibilityService() {
     }
     private suspend fun smartTap(generation: Long, screen: ScreenSnapshot, area: Area): Boolean {
         if (!repository.settings.value.enabled || gate.generation != generation || !gate.isOpen(screen.packageName,SystemClock.elapsedRealtime())) return false
-        val observation = observe() ?: return false
-        observation.use {
-            val fresh=it.screen
-            if (fresh.packageName != screen.packageName || fresh.windowId != screen.windowId || fresh.fingerprint() != screen.fingerprint()) return false
-            if (screen.packageName != "cn.damai" && !visualDemo(screen)) return false
-            val node=VisualPolicy.clickableTarget(fresh,area)
-            if (node!=null) {
-                gate.dispatched()
-                val accepted=it.handles[node.path]?.performAction(AccessibilityNodeInfo.ACTION_CLICK)==true
-                repository.reportDetection(screen.packageName,if (accepted) "视觉目标已关联当前控件并发起点击" else "当前控件未接受点击，停止本轮")
-                return accepted
-            }
+        val fresh=visualWindow() ?: return false
+        if(fresh.windowId!=screen.windowId || AdRecognition.scene(fresh)!=AdRecognition.scene(screen) || !area.valid() ||
+            area.right-area.left>.4f || area.bottom-area.top>.18f) return false
+        if(!AdRecognition.eligible(screen.packageName,repository.settings.value.packages,packageName,repository.settings.value.automaticLearning) && !visualDemo(screen)) return false
+        val node=VisualPolicy.clickableTarget(fresh,area)
+        val handle=node?.let {nodeObservation?.handles?.get(it.path)}?.let {
+            @Suppress("DEPRECATION") AccessibilityNodeInfo.obtain(it)
         }
+        if(handle!=null) {
+            gate.dispatched()
+            val accepted=try {withContext(Dispatchers.IO) {handle.performAction(AccessibilityNodeInfo.ACTION_CLICK)}}
+                finally {@Suppress("DEPRECATION") handle.recycle()}
+            repository.reportDetection(screen.packageName,if(accepted) "AI 目标已关联当前原生控件并发起关闭" else "原生控件未接受关闭，已停止本轮")
+            return accepted
+        }
+        val x=(area.left+area.right)/2;val y=(area.top+area.bottom)/2
+        if(AdRecognition.candidates(fresh).count {x in it.bounds.left..it.bounds.right && y in it.bounds.top..it.bounds.bottom}>1) return false
         gate.dispatched()
         val path = Path().apply { moveTo((area.left+area.right)/2*screen.width,(area.top+area.bottom)/2*screen.height) }
         val gesture = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path,0,60)).build()
@@ -439,11 +551,12 @@ class SkipAccessibilityService : AccessibilityService() {
         writer.println("sessionPackage=${gate.packageName}, eventPackage=$targetEventPackage, eventWindow=$eventWindowId")
         writer.println("lastRead=$lastReadState")
         writer.println("treeReads=$diagnosticTreeReads, ignoredDashboardEvents=$ignoredDashboardEvents")
-        smartPilot?.let { writer.println(it.summary()) }
+        autoLearning?.let { writer.println(it.summary()) }
         windows.forEach { writer.println("window=${it.id}, type=${it.type}, focused=${it.isFocused}, active=${it.isActive}") }
     }
     override fun onDestroy() {
-        smartPilot?.close()
+        clearNodes()
+        autoLearning?.close()
         hideOverlay(); scope.cancel(); repository.connected.value = false
         if (instance === this) serviceRef = WeakReference(null)
         super.onDestroy()

@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">TiaoTiao</string>
-    <string name="accessibility_description">在所选应用启动后短时识别并跳过开屏广告。大麦智能试用使用截图、端侧识别、受限点击和自动结果检查；开启云端分析后会发送遮挡非必要文字的画面。其他应用沿用已验证规则和普通确认流程。可随时暂停或关闭服务。</string>
+    <string name="accessibility_description">在所有已选应用启动后短时检测广告。Jev 提前分析控件，Android 11 及以上结合截图、端侧识别与受限点击，自动检查结果。开启云端分析后可能发送遮挡非必要文字的画面；已验证规则可本地复用。可随时暂停或关闭服务。</string>
 </resources>

@@ -8,6 +8,7 @@ import java.io.IOException
 import javax.net.ssl.SSLException
 import com.haibo.tiaotiao.data.AppRepository
 import com.haibo.tiaotiao.data.ConnectionState
+import com.haibo.tiaotiao.data.InstalledApp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -27,6 +28,12 @@ class JevClient(private val client: OkHttpClient = OkHttpClient.Builder()
         JevProtocol.validateProbe(send(JevProtocol.probeRequest(model), key, model, provider))
         (System.nanoTime() - started) / 1_000_000
     }
+
+    suspend fun inspect(screen: ScreenSnapshot, key: String, model: String, provider: JevProvider): ScreenNode? =
+        withContext(Dispatchers.IO) { JevProtocol.parse(send(JevProtocol.request(screen,model,true),key,model,provider),screen,true) }
+
+    suspend fun classifyApps(apps: List<InstalledApp>, key: String, model: String, provider: JevProvider): List<CategoryPrediction> =
+        withContext(Dispatchers.IO) { JevCategoryProtocol.parse(send(JevCategoryProtocol.request(apps, model), key, model, provider), apps) }
 
     private suspend fun send(body: String, key: String, model: String, provider: JevProvider): String {
         require(key.isNotBlank()) { "请在设置中填写 Jev API Key" }

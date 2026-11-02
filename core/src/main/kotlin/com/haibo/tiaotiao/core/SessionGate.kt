@@ -23,6 +23,8 @@ class SessionGate(private val durationMillis: Long = 10_000) {
         if (applicationWindow && !ownerPackage.isNullOrBlank()) observe(ownerPackage, now)
     }
     fun isOpen(packageName: String, now: Long) = this.packageName == packageName && !dispatched && now - startedAt in 0 until durationMillis
+    /** An unresolved new owner cannot inherit the previous application's completed session. */
+    fun canAwait(owner: String, now: Long) = packageName!=owner || isOpen(owner,now)
     fun claimRequest(fingerprint: String): Boolean = requested.size < 2 && requested.add(fingerprint)
     fun dispatched() { dispatched = true }
     fun reset() { generation++; packageName = null; requested.clear(); dispatched = false }

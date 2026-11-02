@@ -1,0 +1,8 @@
+<!-- QingIcon Abstract/apps-square-circle.svg; Apache-2.0; upstream 316c8881784d8620fff5a764f84ec7be41ef14c1. Converted to VectorDrawable. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="#00000000" android:strokeColor="#FF000000" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M4 4H10V10H4V4Z" />
+    <path android:fillColor="#00000000" android:strokeColor="#FF000000" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M4 14H10V20H4V14Z" />
+    <path android:fillColor="#00000000" android:strokeColor="#FF000000" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M14 4H20V10H14V4Z" />
+    <path android:fillColor="#00000000" android:strokeColor="#FF000000" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M20.5 17C20.5 18.933 18.933 20.5 17 20.5C15.067 20.5 13.5 18.933 13.5 17C13.5 15.067 15.067 13.5 17 13.5C18.933 13.5 20.5 15.067 20.5 17Z" />
+</vector>

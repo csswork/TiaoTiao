@@ -72,4 +72,12 @@ class VisualPolicyTest {
         assertFalse(imported.active())
         assertFalse(VisualPolicy.canAttempt(imported,screen,ad,imported.targetHash))
     }
+    @Test fun `legacy bundles still load and the shared cache supports multiple applications`() {
+        assertEquals(rule,VisualPolicy.decode(ruleJson.encodeToString(VisualBundle(schemaVersion=1,rules=listOf(rule)))).rules.single())
+        val many=(0 until 500).map {rule.copy(id="item-$it",packageName="org.example.app$it")}
+        assertEquals(500,VisualPolicy.decode(ruleJson.encodeToString(VisualBundle(rules=many))).rules.size)
+        assertThrows(IllegalArgumentException::class.java) {
+            VisualPolicy.decode(ruleJson.encodeToString(VisualBundle(rules=many+rule.copy(id="overflow"))))
+        }
+    }
 }

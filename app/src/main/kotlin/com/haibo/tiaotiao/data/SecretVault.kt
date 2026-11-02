@@ -13,6 +13,8 @@ import javax.crypto.spec.GCMParameterSpec
 /** Secrets stay out of JSON exports, backups, UI state and logs. */
 class SecretVault(context: Context) {
     private val prefs = context.getSharedPreferences("sealed_credentials", Context.MODE_PRIVATE)
+    /** Presence checks on a hot detection path must not open/decrypt a hardware-backed key. */
+    fun contains(name: String) = prefs.contains(name)
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         return (store.getKey("tiaotiao.credentials", null) as? SecretKey) ?: KeyGenerator.getInstance(

@@ -10,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -23,6 +24,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalFocusManager
@@ -36,6 +38,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.haibo.tiaotiao.TiaoApplication
+import com.haibo.tiaotiao.R
 import com.haibo.tiaotiao.core.*
 import com.haibo.tiaotiao.data.AppRepository
 import com.haibo.tiaotiao.data.ConnectionState
@@ -48,12 +51,12 @@ import kotlinx.coroutines.*
 
 private val Pine = Color(0xFF276751)
 private val Cream = Color(0xFFF7F8F3)
-private data class InstalledApp(val name: String, val packageName: String)
 
 class MainActivity : ComponentActivity() {
     private val repository get() = (application as TiaoApplication).repository
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        (application as TiaoApplication).appClassification.refresh()
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(primary = Pine, secondary = Color(0xFF536B5F),
                 secondaryContainer = Color(0xFFDDEBDD), onSecondaryContainer = Pine,
@@ -100,7 +103,7 @@ class MainActivity : ComponentActivity() {
         }
         val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) task {
-                val text = requireNotNull(contentResolver.openInputStream(uri)).use { String(it.readLimited(RuleCodec.MAX_BYTES), Charsets.UTF_8) }
+                val text = requireNotNull(contentResolver.openInputStream(uri)).use { String(it.readLimited(VisualPolicy.MAX_BYTES), Charsets.UTF_8) }
                 if (text.contains("\"TiaoTiaoVisualRules\"")) "已导入 ${repository.importVisual(text)} 条智能候选，等待本机自动检查"
                 else "已导入 ${repository.importRules(text)} 条新规则，试跳确认后可自动使用"
             }
@@ -140,7 +143,13 @@ class MainActivity : ComponentActivity() {
         }
 
         Scaffold(containerColor = Cream, snackbarHost = { SnackbarHost(snackbar) },
-            topBar = { TopAppBar(navigationIcon={ if(selectedRuleKey!=null) TextButton(onClick={selectedRuleKey=null},modifier=Modifier.semantics { contentDescription="返回规则列表" }) { Text("‹ 返回") } },
+            topBar = { TopAppBar(navigationIcon={
+                if(selectedRuleKey!=null) IconButton(onClick={selectedRuleKey=null},modifier=Modifier.semantics { contentDescription="返回规则列表" }) {
+                    QingIcon(QingGlyph.CHEVRON_LEFT)
+                } else Box(Modifier.padding(start=20.dp,end=8.dp),contentAlignment=Alignment.Center) {
+                    Image(painterResource(R.drawable.ic_launcher),contentDescription=null,modifier=Modifier.size(36.dp))
+                }
+            },
                 title = { Column {
                 Text(if(selectedRuleKey!=null) "规则详情" else "TiaoTiao", fontWeight = FontWeight.Bold)
                 Text(if(selectedRuleKey!=null) "点击位置与处理进度" else "让等待少一点", style = MaterialTheme.typography.labelMedium, color = Pine)
@@ -148,7 +157,7 @@ class MainActivity : ComponentActivity() {
             bottomBar = { if(selectedRuleKey==null) NavigationBar(containerColor = Color.White) {
                 listOf("首页", "应用", "规则", "记录", "设置").forEachIndexed { index, title ->
                     NavigationBarItem(selected = tab == index, onClick = { tab = index; if(index==2) ruleFilter=RuleFilter.ALL; if(index==1) onlySelectedApps=false },
-                        icon = { Text(listOf("⌂", "▦", "≡", "◷", "⚙")[index], style = MaterialTheme.typography.titleLarge) }, label = { Text(title) })
+                        icon = { QingIcon(listOf(QingGlyph.HOME,QingGlyph.APPS,QingGlyph.RULES,QingGlyph.HISTORY,QingGlyph.SETTINGS)[index]) }, label = { Text(title) })
                 }
             } }) { padding ->
             Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
@@ -218,13 +227,13 @@ class MainActivity : ComponentActivity() {
                         }
                         detection?.let { latest -> item { SectionCard("最近处理") {
                             Text(latest.message,style=MaterialTheme.typography.bodyMedium)
-                            TextButton(onClick={tab=3}) { Text("查看处理记录 ›") }
+                            TextButton(onClick={tab=3}) { Text("查看处理记录");Spacer(Modifier.width(4.dp));QingIcon(QingGlyph.CHEVRON_RIGHT,size=20.dp) }
                         } } }
-                        item { SectionCard("大麦 · 智能自动学习试用") {
-                            Text("自动采样 → 视觉 AI 学习 → 自动尝试 → 结果检查。方案会缓存，页面结束后仍可继续学习。")
+                        item { SectionCard("通用自动学习") {
+                            Text("所有已选应用共用：Jev 提前检查控件，OCR 与视觉识别补充图标；方案缓存后自动尝试并检查结果。")
                             Row(verticalAlignment=Alignment.CenterVertically) {
                                 Text("智能学习",Modifier.weight(1f))
-                                Switch(checked=settings.smartDamai,onCheckedChange={ repository.updateSettings { s -> s.copy(smartDamai=it) } })
+                                Switch(checked=settings.automaticLearning,onCheckedChange={ repository.updateSettings { s -> s.copy(automaticLearning=it) } })
                             }
                             Text("智能规则：${visualRules.count { it.active() }} 条已启用，${visualRules.count { it.state==VisualRuleState.CANDIDATE }} 条学习中",style=MaterialTheme.typography.bodySmall)
                             OutlinedButton(onClick={
@@ -233,7 +242,10 @@ class MainActivity : ComponentActivity() {
                             }) { Text("智能视觉演示（无需确认）") }
                         } }
                         item { SectionCard("开始使用") {
-                            Text(if (connected) "● 无障碍服务已连接" else "○ 无障碍服务未连接", color = Pine)
+                            Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                                QingIcon(if(connected) QingGlyph.CHECK_CIRCLE else QingGlyph.PENDING_CIRCLE,size=20.dp,tint=Pine)
+                                Text(if (connected) "无障碍服务已连接" else "无障碍服务未连接", color = Pine)
+                            }
                             Text("开启服务后，到「应用」选择需要处理的应用。小米系统如回收服务，可从这里重新开启。", style = MaterialTheme.typography.bodyMedium)
                             Button(onClick = { disclosure = true }, modifier = Modifier.fillMaxWidth()) { Text("打开无障碍设置") }
                             OutlinedButton(onClick = { onlySelectedApps=false;tab = 1 }, modifier = Modifier.fillMaxWidth()) { Text("选择应用") }
@@ -251,10 +263,10 @@ class MainActivity : ComponentActivity() {
                         if (hasJevKey) item(key="model_connection") { SectionCard("AI 服务已配置") {
                             Text(modelConnection.message,color=if(modelConnection.state==ConnectionState.FAILED) Color(0xFF9C3B20) else Pine,style=MaterialTheme.typography.bodyMedium)
                             Text(if(settings.cloudEnabled) "${settings.jevProvider.displayName} · 云端分析已开启" else "云端分析已关闭，已验证规则仍可本地使用",style=MaterialTheme.typography.bodySmall)
-                            TextButton(onClick={focusJevKey=false;tab=4}) { Text("管理 API 配置 ›") }
+                            TextButton(onClick={focusJevKey=false;tab=4}) { Text("管理 API 配置");Spacer(Modifier.width(4.dp));QingIcon(QingGlyph.CHEVRON_RIGHT,size=20.dp) }
                         } }
                     }
-                    1 -> Applications(repository,onlySelectedApps,{onlySelectedApps=it})
+                    1 -> ApplicationsPage(repository,onlySelectedApps,{onlySelectedApps=it},onConfigure={focusJevKey=!hasJevKey;tab=4})
                     2 -> RuleListPage(entries,ruleFilter,{ruleFilter=it},{selectedRuleKey=it.key},
                         onImport={importer.launch(arrayOf("application/json","text/plain","application/octet-stream"))},
                         onExport={transferAction="export"},onShare={transferAction="share"},busy=busy)
@@ -268,11 +280,11 @@ class MainActivity : ComponentActivity() {
             }
         }
         if (disclosure) AlertDialog(onDismissRequest = { disclosure = false }, title = { Text("开启 TiaoTiao 无障碍服务") }, text = {
-            Text("TiaoTiao 在选定应用启动后短时读取界面并执行跳过。大麦智能试用还会截图、端侧文字识别、自动尝试跳过并检查结果；其他应用沿用普通确认流程。你可随时暂停。云端分析需另行开启。")
+            Text("TiaoTiao 在所有已选应用启动后短时检测广告，结合控件、图标和端侧识别，自动尝试并检查结果。Android 11 及以上支持截图；可随时暂停，云端分析需另行开启。")
         }, confirmButton = { TextButton(onClick = { disclosure = false; startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) { Text("了解，前往设置") } },
             dismissButton = { TextButton(onClick = { disclosure = false }) { Text("取消") } })
         if (cloudDisclosure) AlertDialog(onDismissRequest = { cloudDisclosure = false }, title = { Text("允许 Jev 分析未知界面") }, text = {
-            Text("普通规则发送筛选后的控件信息。大麦智能试用会向 Vercel 及视觉模型发送遮挡非必要文字的开屏和点击前后画面。图片最多缓存 8 份，识别成功后删除，未识别画面在 24 小时后清理，不导出分享。可随时关闭智能学习或云端分析。")
+            Text("应用分类向所选 Jev 服务发送应用名称和包名。普通规则发送筛选后的控件信息。开启通用自动学习后，所选应用的控件会交给 Jev 判断；Vercel 视觉路径还会发送遮挡非必要文字的开屏和点击前后画面。图片最多缓存 8 份，识别成功后删除，未识别画面在 24 小时后清理，不导出分享。可随时关闭云端分析。")
         }, confirmButton = { TextButton(onClick = { repository.updateSettings { it.copy(cloudEnabled = true) }; cloudDisclosure = false }) { Text("允许") } },
             dismissButton = { TextButton(onClick = { cloudDisclosure = false }) { Text("取消") } })
         transferAction?.let { action -> AlertDialog(onDismissRequest={transferAction=null},
@@ -287,48 +299,6 @@ class MainActivity : ComponentActivity() {
                 }
             }},confirmButton={TextButton(onClick={transferAction=null}) {Text("取消")}}) }
 
-    }
-
-    @Composable private fun Applications(repository: AppRepository, onlySelected: Boolean, onOnlySelected: (Boolean) -> Unit) {
-        val settings by repository.settings.collectAsStateWithLifecycle()
-        var apps by remember { mutableStateOf<List<InstalledApp>>(emptyList()) }
-        var loading by remember { mutableStateOf(true) }
-        var query by remember { mutableStateOf("") }
-        LaunchedEffect(Unit) {
-            apps = withContext(Dispatchers.IO) {
-                val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                @Suppress("DEPRECATION")
-                packageManager.queryIntentActivities(intent, 0).map {
-                    InstalledApp(it.loadLabel(packageManager).toString(), it.activityInfo.packageName)
-                }.filter { it.packageName != packageName }.distinctBy { it.packageName }.sortedBy { it.name.lowercase() }
-            }
-            loading = false
-        }
-        Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-            Text(if(onlySelected) "已选择的应用" else "应用列表", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-            Text("默认全部关闭。模拟开屏不需要在此选择。", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 10.dp))
-            OutlinedTextField(value = query, onValueChange = { query = it }, label = { Text("搜索名称或包名") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-            Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected=!onlySelected,onClick={onOnlySelected(false)},label={Text("全部应用")})
-                FilterChip(selected=onlySelected,onClick={onOnlySelected(true)},label={Text("已选择 ${settings.packages.size}")})
-            }
-            if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
-            val filtered=remember(apps,onlySelected,settings.packages,query) {
-                apps.filter { (!onlySelected || it.packageName in settings.packages) && (it.name.contains(query,true) || it.packageName.contains(query,true)) }
-            }
-            LazyColumn(contentPadding = PaddingValues(vertical = 12.dp)) {
-                if (!loading && filtered.isEmpty()) item { EmptyState(if(query.isNotBlank()) "没有找到匹配的应用" else "还没有选择应用", "可切换到全部应用，搜索并开启需要处理的应用。") }
-                items(filtered, key = { it.packageName },contentType={"application"}) { app ->
-                    Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) { Text(app.name, fontWeight = FontWeight.Medium); Text(app.packageName, style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
-                        Switch(checked = app.packageName in settings.packages, modifier = Modifier.semantics { contentDescription = "处理 ${app.name}" }, onCheckedChange = { checked ->
-                            repository.updateSettings { it.copy(packages = if (checked) it.packages + app.packageName else it.packages - app.packageName) }
-                        })
-                    }
-                    HorizontalDivider(color = Color(0xFFE7EAE3))
-                }
-            }
-        }
     }
 
     @Composable private fun SettingsPage(repository: AppRepository, busy: Boolean, samples: Int,
@@ -379,9 +349,7 @@ class MainActivity : ComponentActivity() {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(onClick = { task {
                         provider.validateModel(model.trim())
-                        if (key.isNotBlank()) repository.vault.set("jevKey", key.trim())
-                        repository.invalidateModelConnection()
-                        repository.updateSettings { it.copy(model = model.trim(), jevProvider = provider) }
+                        repository.configureAi(provider,model.trim(),key.trim())
                         withContext(Dispatchers.Main) {
                             key = ""; onKeyPresenceChanged(repository.vault.get("jevKey").isNotBlank())
                             focusManager.clearFocus(); keyboard?.hide()
@@ -389,8 +357,7 @@ class MainActivity : ComponentActivity() {
                         testModelConnection(repository)
                     } }, enabled = !busy) { Text("保存并测试") }
                     TextButton(onClick = { task {
-                        repository.vault.set("jevKey", ""); repository.updateSettings { it.copy(cloudEnabled = false) }
-                        repository.invalidateModelConnection()
+                        repository.clearAiCredentials()
                         withContext(Dispatchers.Main) { key = ""; onKeyPresenceChanged(false) }; "已清除密钥并关闭云端分析"
                     } }, enabled = !busy) { Text("清除密钥") }
                 }
@@ -398,8 +365,8 @@ class MainActivity : ComponentActivity() {
                     color = if (connection.state == ConnectionState.FAILED) Color(0xFF9C3B20) else Pine)
                 Text("连接测试会发送一条固定测试请求，不读取其他应用的内容。", style = MaterialTheme.typography.bodySmall)
             } }
-            item { SectionCard("大麦 · 视觉学习模型") {
-                Text("沿用 Vercel 网关密钥。端侧文字识别随安装包提供；未知画面由视觉模型学习，点击后自动检查结果。")
+            item { SectionCard("通用视觉学习模型") {
+                Text("适用于所有已选应用。Jev 可通过所选服务提前分析控件；截图学习与独立 AI 结果复核沿用 Vercel 网关密钥。端侧文字识别随安装包提供。")
                 Text("截图遮挡非必要文字后发送至 Vercel 及模型提供方；最多缓存 8 份，成功后删除，未识别画面按 24 小时过期清理。",style=MaterialTheme.typography.bodySmall)
                 OutlinedTextField(value=visionModel,onValueChange={visionModel=it},label={Text("视觉模型")},modifier=Modifier.fillMaxWidth(),singleLine=true)
                 Button(onClick={ task {
@@ -432,7 +399,7 @@ class MainActivity : ComponentActivity() {
                 Text("普通规则保留筛选后的节点样本；智能学习另有少量遮挡图片缓存，识别成功或过期后清理。", style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = { task { repository.clearSamples(); (application as TiaoApplication).visualLearner.clearPending(); "已清空本地节点与视觉学习样本" } }, enabled = !busy) { Text("清空样本") }
             } }
-            item { Text("TiaoTiao 0.2.2 · 智能视觉试用需要 Android 11 及以上\n服务被系统关闭后，需在系统设置重新开启。", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
+            item { Text("TiaoTiao 0.3.0 · 智能视觉试用需要 Android 11 及以上\n服务被系统关闭后，需在系统设置重新开启。", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
         }
     }
 }
@@ -452,13 +419,8 @@ class MainActivity : ComponentActivity() {
             Text(value,style=MaterialTheme.typography.headlineMedium,color=Pine,fontWeight=FontWeight.SemiBold)
             Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
                 Text(label,style=MaterialTheme.typography.labelMedium,modifier=Modifier.weight(1f))
-                Text("›",color=Pine)
+                QingIcon(QingGlyph.CHEVRON_RIGHT,size=20.dp,tint=Pine)
             }
         }
-    }
-}
-@Composable private fun EmptyState(title: String, text: String) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 36.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(title, style = MaterialTheme.typography.titleMedium); Text(text, style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
     }
 }

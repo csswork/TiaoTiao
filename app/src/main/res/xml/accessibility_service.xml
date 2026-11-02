@@ -7,6 +7,6 @@
     android:canRetrieveWindowContent="true"
     android:canTakeScreenshot="true"
     android:canPerformGestures="true"
-    android:notificationTimeout="100"
+    android:notificationTimeout="40"
     android:isAccessibilityTool="false"
     android:settingsActivity="com.haibo.tiaotiao.ui.MainActivity" />

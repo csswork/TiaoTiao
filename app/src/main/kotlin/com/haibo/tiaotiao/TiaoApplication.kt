@@ -11,12 +11,16 @@ import com.haibo.tiaotiao.ui.SmartDemoActivity
 import java.lang.ref.WeakReference
 
 class TiaoApplication : Application() {
-    enum class ForegroundScreen { OTHER, DASHBOARD, DEMO }
+    enum class ForegroundScreen { OTHER, DASHBOARD, DEMO, VISUAL_DEMO }
     @Volatile var foregroundScreen=ForegroundScreen.OTHER
         private set
     val repository by lazy { AppRepository(this) }
     val appLabels by lazy { AppLabels(this) }
-    val visualLearner by lazy { com.haibo.tiaotiao.data.VisualLearner(this, repository) }
+    val appClassification by lazy { com.haibo.tiaotiao.data.AppClassification(this, repository) }
+    @Volatile private var learner: com.haibo.tiaotiao.data.VisualLearner?=null
+    var visualLearner: com.haibo.tiaotiao.data.VisualLearner
+        get()=learner ?: com.haibo.tiaotiao.data.VisualLearner(this,repository).also {learner=it}
+        internal set(value) {learner=value}
     override fun onCreate() {
         super.onCreate()
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
@@ -25,7 +29,8 @@ class TiaoApplication : Application() {
                 resumed=WeakReference(activity)
                 foregroundScreen=when(activity) {
                     is MainActivity -> ForegroundScreen.DASHBOARD
-                    is DemoActivity, is SmartDemoActivity -> ForegroundScreen.DEMO
+                    is DemoActivity -> ForegroundScreen.DEMO
+                    is SmartDemoActivity -> ForegroundScreen.VISUAL_DEMO
                     else -> ForegroundScreen.OTHER
                 }
             }

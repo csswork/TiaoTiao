@@ -24,6 +24,7 @@ data class ScreenNode(
     val label: String = "",
     val clickable: Boolean,
     val bounds: Area,
+    val legacyLabel: String? = null,
 )
 
 @Serializable
@@ -41,7 +42,7 @@ data class ScreenSnapshot(
     fun fingerprint(): String = digest(buildString {
         append("$packageName|$versionCode|$width|$height\n")
         nodes.forEach {
-            append("${it.path}|${it.resourceId}|${it.className}|${it.clickable}|${SignalText.canonical(it.label)}\n")
+            append("${it.path}|${it.resourceId}|${it.className}|${it.clickable}|${SignalText.legacyCanonical(it.legacyLabel ?: it.label)}\n")
         }
     })
     fun candidates() = if (complete) nodes.filter { it.clickable && it.bounds.valid() }.take(60) else emptyList()
@@ -51,21 +52,47 @@ object SignalText {
     private const val SKIP_WORD = "(?:跳过(?:广告)?|关闭广告|skip(?:\\s+ad)?)"
     private const val COUNTDOWN = "[（(\\[]?\\s*\\d+\\s*(?:s|秒)?\\s*[)）\\]]?"
     private val skip = Regex("^(?:$SKIP_WORD(?:\\s*[|｜·:：]?\\s*$COUNTDOWN)?|$COUNTDOWN\\s*(?:后)?\\s*[|｜·:：]?\\s*$SKIP_WORD)$", RegexOption.IGNORE_CASE)
+    private val dismiss=Regex("^(?:关闭(?:广告)?|close(?:\\s+ad)?|dismiss|[x×✕✖╳])(?:\\s*[|｜·:：]?\\s*$COUNTDOWN)?$",RegexOption.IGNORE_CASE)
     fun isSkip(value: String) = skip.matches(value.trim().take(80))
+    fun legacySanitize(value: String): String {
+        val text=value.trim().take(200)
+        return when {
+            isSkip(text) -> "跳过"
+            text=="广告" || text.equals("advertisement",true) || text=="AD" -> "广告"
+            text in setOf("跳过登录","跳过引导","跳过教程","安装","下载","购买","打开","立即查看") -> text
+            else -> ""
+        }
+    }
+    fun legacyCanonical(label: String) = label.split(" | ").map(::legacySanitize).filter(String::isNotBlank).distinct().sorted().joinToString("|")
     fun sanitize(value: String): String {
         val text = value.trim().take(200)
         return when {
             isSkip(text) -> "跳过"
+            dismiss.matches(text) -> "关闭"
             text == "广告" || text.equals("advertisement", true) || text == "AD" -> "广告"
-            text in setOf("跳过登录", "跳过引导", "跳过教程", "安装", "下载", "购买", "打开", "立即查看") -> text
+            text in setOf("跳过登录", "跳过引导", "跳过教程", "安装", "下载", "购买", "打开", "立即查看","支付","允许","拒绝") -> text
+            listOf("登录","注册","引导","教程","支付","授权","权限","购买","下载","安装").any {it in text} ->
+                listOf("登录","注册","引导","教程","支付","授权","权限","购买","下载","安装").first {it in text}
+            text in setOf("略过","稍后","暂不","以后再说","不感兴趣","点击跳过") -> text
             else -> ""
         }
+    }
+    /** A semantic token extracted from a sentence does not make the original sentence public. */
+    fun isPublicControlText(value: String): Boolean {
+        val text=value.trim()
+        if (text.length>40 || Regex("\\d{3,}").containsMatchIn(text)) return false
+        return isSkip(text) || dismiss.matches(text) || text in setOf(
+            "广告","AD","Advertisement","advertisement","跳过登录","跳过引导","跳过教程",
+            "安装","下载","购买","打开","立即查看","支付","允许","拒绝","登录","注册",
+            "引导","教程","授权","权限","略过","稍后","暂不","以后再说","不感兴趣","点击跳过")
     }
     fun canonical(label: String) = label.split(" | ").map(::sanitize).filter(String::isNotBlank).distinct().sorted().joinToString("|")
     fun hasSkip(label: String): Boolean {
         val parts = label.split(" | ").filter(String::isNotBlank)
         return parts.isNotEmpty() && parts.all(::isSkip)
     }
+    fun hasCompatibleSkip(node: ScreenNode) = hasSkip(node.legacyLabel ?: node.label) &&
+        node.label.split(" | ").filter(String::isNotBlank).all {isSkip(it) || it=="关闭"}
 }
 
 @Serializable enum class RuleStatus { PENDING, TRIALLED, VERIFIED, DISABLED, IMPORTED }
@@ -105,10 +132,10 @@ sealed interface VerifiedSceneLookup {
 
 object RuleEngine {
     fun compile(screen: ScreenSnapshot, candidate: ScreenNode, source: String, now: Long): SkipRule {
-        require(candidate in screen.candidates() && SignalText.hasSkip(candidate.label)) { "目标不是当前页面中可确认的跳过控件" }
+        require(candidate in screen.candidates() && SignalText.hasCompatibleSkip(candidate)) { "目标不是当前页面中可确认的跳过控件" }
         return SkipRule(packageName = screen.packageName, versionCode = screen.versionCode,
             screenFingerprint = screen.fingerprint(),
-            target = TargetSelector(candidate.path, candidate.resourceId, candidate.className, candidate.label, candidate.bounds),
+            target = TargetSelector(candidate.path, candidate.resourceId, candidate.className, candidate.legacyLabel ?: candidate.label, candidate.bounds),
             source = source, createdAt = now)
     }
     fun locate(rule: SkipRule, screen: ScreenSnapshot): ScreenNode? {
@@ -117,8 +144,8 @@ object RuleEngine {
             rule.screenFingerprint != screen.fingerprint()) return null
         val targets = screen.candidates().filter {
             it.path == rule.target.path && it.resourceId == rule.target.resourceId &&
-                it.className == rule.target.className && SignalText.hasSkip(it.label) &&
-                SignalText.canonical(it.label) == SignalText.canonical(rule.target.label) && it.bounds.near(rule.target.bounds)
+                it.className == rule.target.className && SignalText.hasCompatibleSkip(it) &&
+                SignalText.legacyCanonical(it.legacyLabel ?: it.label) == SignalText.legacyCanonical(rule.target.label) && it.bounds.near(rule.target.bounds)
         }
         return targets.singleOrNull()
     }
