@@ -4,6 +4,7 @@ import kotlinx.serialization.Serializable
 import java.util.UUID
 
 @Serializable enum class VisualRuleState { CANDIDATE, ACTIVE, PAUSED }
+@Serializable enum class TapMethod { AUTO, ACCESSIBILITY, GESTURE }
 @Serializable data class AutoEvidence(val session: String, val behavior: String, val at: Long,
     val earlyClick: Boolean, val normalHome: Boolean, val sameApplication: Boolean, val timingBasis: String = "countdown")
 @Serializable data class VisualRule(
@@ -19,9 +20,11 @@ import java.util.UUID
     val nodeTarget: TargetSelector? = null,
     val nodeScene: String = "",
     val contextHash: String = "",
+    val tapMethod: TapMethod = TapMethod.AUTO,
 ) {
     fun behavior() = digest("$packageName|$versionCode|$scene|$target|$targetHash|$label" +
-        if(sceneVersion==1 && nodeTarget==null && nodeScene.isEmpty() && contextHash.isEmpty()) "" else "|$sceneVersion|$nodeTarget|$nodeScene|$contextHash")
+        (if(sceneVersion==1 && nodeTarget==null && nodeScene.isEmpty() && contextHash.isEmpty()) "" else "|$sceneVersion|$nodeTarget|$nodeScene|$contextHash") +
+        if(tapMethod==TapMethod.AUTO) "" else "|tap:$tapMethod")
     fun successfulSessions() = evidence.filter { it.behavior == behavior() && it.earlyClick && it.normalHome && it.sameApplication }.map { it.session }.distinct().size
     fun active() = state == VisualRuleState.ACTIVE && successfulSessions() >= 2
 }
@@ -50,6 +53,25 @@ object VisualPolicy {
             val b=n.bounds
             b.right-b.left<=.25f && b.bottom-b.top<=.15f && x in b.left..b.right && y in b.top..b.bottom
         }.singleOrNull()
+    }
+    /** An image supplies a touch point, not proof that a nearby accessibility action works. */
+    fun nativeTarget(rule: VisualRule, screen: ScreenSnapshot, area: Area): ScreenNode? = when(rule.tapMethod) {
+        TapMethod.GESTURE -> null
+        TapMethod.AUTO -> clickableTarget(screen,area)
+        TapMethod.ACCESSIBILITY -> rule.nodeTarget?.takeIf {AdRecognition.matchesNode(it,screen)}?.let {target ->
+            screen.nodes.singleOrNull {it.path==target.path}
+        }
+    }
+    /** Changing the action invalidates its old evidence. Never resume a user-disabled target. */
+    fun migrateExecution(rule: VisualRule): VisualRule {
+        if(rule.tapMethod!=TapMethod.AUTO) return rule
+        val retry=rule.nodeTarget==null && rule.state==VisualRuleState.PAUSED && rule.automaticFailures<=1 &&
+            rule.lastResult=="广告或目标仍存在，已暂停"
+        val paused=rule.state==VisualRuleState.PAUSED && !retry
+        return rule.copy(tapMethod=if(rule.nodeTarget==null) TapMethod.GESTURE else TapMethod.ACCESSIBILITY,
+            state=if(paused) VisualRuleState.PAUSED else VisualRuleState.CANDIDATE,evidence=emptyList(),homeScene="",homeHash="",
+            automaticFailures=if(retry) 0 else rule.automaticFailures,
+            lastResult=if(paused) rule.lastResult else "点击方式已更新，等待自动检查")
     }
     fun validate(rule: VisualRule) {
         require(rule.packageName.matches(Regex("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z][A-Za-z0-9_]*)+")))

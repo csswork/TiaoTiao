@@ -10,7 +10,7 @@ import java.util.UUID
 class AutoLearning(private val service: SkipAccessibilityService,
     private val currentWindow: () -> ScreenSnapshot?,
     private val current: () -> ScreenSnapshot?, private val open: (Long,String) -> Boolean,
-    private val tap: suspend (Long,ScreenSnapshot,Area) -> Boolean) {
+    private val tap: suspend (Long,ScreenSnapshot,Area,VisualRule) -> Boolean) {
     private val app get() = service.application as TiaoApplication
     private val repository get() = app.repository
     private val capture = VisualCapture(service)
@@ -118,8 +118,13 @@ class AutoLearning(private val service: SkipAccessibilityService,
                 ?.maxByOrNull { it.successfulSessions() }
             if(rule==null && matches.isNotEmpty() && matches.all {it.target.near(matches.first().target)}) rule=matches.maxByOrNull {it.successfulSessions()}
             if (demo(screen) && rule==null && skip!=null && stable && frame.signals.advertisement) {
-                rule=VisualRule(packageName=screen.packageName,versionCode=screen.versionCode,scene=AdRecognition.scene(screen),sceneVersion=2,target=skip,
-                    targetHash=frame.patch(skip),label="skip",source="bundled-ocr-demo",createdAt=System.currentTimeMillis())
+                val node=VisualPolicy.clickableTarget(screen,skip)
+                val target=node?.bounds ?: skip
+                rule=VisualRule(packageName=screen.packageName,versionCode=screen.versionCode,scene=AdRecognition.scene(screen),sceneVersion=2,target=target,
+                    targetHash=frame.patch(target),label="skip",source="bundled-ocr-demo",createdAt=System.currentTimeMillis(),
+                    tapMethod=if(node==null) TapMethod.GESTURE else TapMethod.ACCESSIBILITY,
+                    nodeTarget=node?.let {TargetSelector(it.path,it.resourceId,it.className,it.label,it.bounds)},
+                    nodeScene=if(node==null) "" else AdRecognition.nodeScene(screen))
                 repository.putVisual(rule)
             }
             if(rule!=null && adScene!=rule.behavior()) {
@@ -144,7 +149,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
                 val chosen=rule
                 pendingRule=chosen;tapAt=SystemClock.elapsedRealtime()
                 val clickArea=frame.signals.skips.singleOrNull { it.near(chosen.target) } ?: chosen.target
-                if (!tap(gen,screen,clickArea)) {
+                if (!tap(gen,screen,clickArea,chosen)) {
                     pendingRule=null
                     repository.reportDetection(screen.packageName,"智能点击未被接受或界面已变化，停止本轮")
                     return
@@ -152,6 +157,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
                 repository.reportDetection(screen.packageName,if (chosen.active()) "已复用智能规则，正在自动检查结果" else "已自动尝试缓存方案，正在检查结果；无需人工确认")
                 // Wait for two consecutive changed frames; the first frame can still be a launch/exit animation.
                 val afterFrames=mutableListOf<VisualFrame>()
+                var changedStreak=0
                 try {
                     for (index in 0 until 5) {
                         delay(if (index==0) 450 else 550)
@@ -161,20 +167,21 @@ class AutoLearning(private val service: SkipAccessibilityService,
                             catch (_: Exception) { continue }
                         val owner=currentWindow()
                         if(owner==null || owner.packageName!=snapshot.packageName || owner.windowId!=snapshot.windowId) {observed.close();break}
-                        if (frame.difference(observed)>.04 && observed.signals.skips.isEmpty()) {
-                            afterFrames+=observed
-                            if (afterFrames.size==2) break
-                        } else {
-                            observed.close();afterFrames.forEach { it.close() };afterFrames.clear()
-                        }
+                        val changed=frame.difference(observed)>.04 && observed.signals.skips.none {it.near(clickArea)}
+                        changedStreak=if(changed) changedStreak+1 else 0
+                        afterFrames+=observed
+                        if(afterFrames.size>2) afterFrames.removeAt(0).close()
+                        if(changedStreak>=2) break
                     }
                     pendingRule=null
                     if (afterFrames.size<2) {
-                        pause(chosen,"广告或目标仍存在，已暂停")
-                        repository.reportDetection(screen.packageName,"未观察到连续两帧页面变化，智能方案已暂停")
+                        // Missing screenshots say nothing about whether the target itself works.
+                        repository.reportDetection(screen.packageName,"点击后未取得两帧有效截图，本次不计为验证成功；保留方案")
                         return
                     }
                     val after1=afterFrames[0];val after2=afterFrames[1]
+                    val changed=changedStreak>=2
+                    repository.log(screen.packageName,"结果观察：方式=${chosen.tapMethod}，连续变化=$changed，末帧广告=${after2.signals.advertisement}，原位置关闭标记=${after2.signals.skips.any {it.near(clickArea)}}，首页=${after2.signals.home}")
                     val beforeHash=frame.patch(homeArea);val firstHash=after1.patch(homeArea);val secondHash=after2.patch(homeArea)
                     val homeHash=VisualPolicy.homeTemplate(beforeHash,firstHash,secondHash)
                     val remaining=frame.signals.countdown?.times(1000L) ?: (baseline-(frame.at-adSeenAt))
@@ -183,14 +190,14 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     val early=remaining>=2000 && after1.at-frame.at<remaining-300
                     val basis=if (frame.signals.countdown!=null) "countdown" else if (baseline>0) "observed_baseline" else "unknown"
                     if (chosen.source=="bundled-ocr-demo") {
-                        repository.putVisual(VisualPolicy.record(chosen,session,early,true,true,System.currentTimeMillis(),basis))
+                        repository.putVisual(VisualPolicy.record(chosen,session,early,changed,true,System.currentTimeMillis(),basis))
                         repository.reportDetection(screen.packageName,"演示自动检查完成，无需云端或人工确认")
-                    } else if (chosen.active() && early && !after1.signals.advertisement && !after2.signals.advertisement &&
+                    } else if (chosen.active() && changed && early && !after1.signals.advertisement && !after2.signals.advertisement &&
                         ((after1.signals.home && after2.signals.home) || VisualPolicy.matchesHome(chosen,beforeHash,firstHash,secondHash) ||
                         (chosen.homeScene.isNotEmpty() && after1.screen.fingerprint()==chosen.homeScene && after2.screen.fingerprint()==chosen.homeScene))) {
                         repository.reportDetection(screen.packageName,"智能规则本地复用及结果检查通过，未请求云端模型")
                     } else if (cloudReady) {
-                        repository.reportDetection(screen.packageName,"已观察到连续页面变化，AI 正在自动复核结果")
+                        repository.reportDetection(screen.packageName,if(changed) "已观察到连续页面变化，AI 正在自动复核结果" else "本地结果不明确，AI 正在检查广告是否仍然存在")
                         val homeScene=after2.screen.fingerprint().takeIf { after2.screen.complete && it!=screen.fingerprint() }.orEmpty()
                         app.visualLearner.verify(chosen,session,listOf(frame.jpeg,after1.jpeg,after2.jpeg),early,true,homeScene,homeHash,basis)
                     } else {

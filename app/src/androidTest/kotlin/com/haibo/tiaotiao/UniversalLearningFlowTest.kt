@@ -44,9 +44,9 @@ class UniversalLearningFlowTest {
             val diagnostics=shell("dumpsys activity service ${context.packageName}/com.haibo.tiaotiao.service.SkipAccessibilityService")
             fail("$label 超时；$diagnostics；日志=${repository.logs.value.take(12)}")
         }
-        fun open(pkg: String,login: Boolean=false,canvas: Boolean=false) = instrumentation.runOnMainSync {
+        fun open(pkg: String,login: Boolean=false,canvas: Boolean=false,inert: Boolean=false) = instrumentation.runOnMainSync {
             context.startActivity(Intent().setComponent(ComponentName(pkg,"com.haibo.tiaotiao.fixture.FixtureActivity"))
-                .putExtra("login",login).putExtra("canvas",canvas).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+                .putExtra("login",login).putExtra("canvas",canvas).putExtra("inert",inert).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
         }
         fun clicks(pkg: String)=shell("run-as $pkg cat files/clicks").trim().toIntOrNull() ?: 0
         fun leave() {shell("am start -W -a android.intent.action.MAIN -c android.intent.category.HOME");Thread.sleep(700)}
@@ -100,7 +100,7 @@ class UniversalLearningFlowTest {
         context.getSharedPreferences("visual_baselines",android.content.Context.MODE_PRIVATE).edit().clear().commit()
         app.visualLearner=VisualLearner(context,repository,{JevClient(jevHttp)},{VisualClient(visionHttp)})
         app.visualLearner.clearPending()
-        listOf(alpha,beta).forEach {shell("run-as $it rm -f files/clicks")}
+        listOf(alpha,beta).forEach {shell("run-as $it rm -f files/clicks files/native_attempts")}
         repository.visualRules.value.filter {it.packageName in setOf(alpha,beta)}.forEach {repository.removeVisual(it.id)}
         repository.vault.set("jevKey","isolated-test-key-no-live-requests")
         try {
@@ -148,6 +148,7 @@ class UniversalLearningFlowTest {
             await("无广告和跳过文字的纯图像关闭") {clicks(beta)==2}
             await("无倒计时的首次检查保留候选") {repository.visualRules.value.any {it.packageName==beta && it.evidence.any {proof -> proof.timingBasis=="unknown"}}}
             val imageRule=repository.visualRules.value.first {it.packageName==beta}
+            assertEquals(TapMethod.GESTURE,imageRule.tapMethod)
             assertEquals("页面消失不能单独证明提前关闭",0,imageRule.successfulSessions())
             assertTrue(recognitions.get()>beforeImages)
             assertEquals("没有控件时不向 Jev 编造目标",beforeNodes,calls[beta]?.get())
@@ -162,6 +163,12 @@ class UniversalLearningFlowTest {
             await("纯图像广告再次复用") {clicks(beta)==4}
             await("纯图像方案跨会话启用") {repository.visualRules.value.any {it.packageName==beta && it.active()}}
             assertEquals("已知图像目标不应重复识别",cachedImageCalls,recognitions.get())
+            val beforeVerify=verifications.get()
+            leave();open(beta,canvas=true,inert=true)
+            await("图像目标必须真正触控，不能替换成无效原生点击") {clicks(beta)==5}
+            assertEquals("图像方案不应尝试无效的原生 ACTION_CLICK",0,shell("run-as $beta cat files/native_attempts").trim().toIntOrNull() ?: 0)
+            await("首页其他位置的叉号不能阻止 AI 验证") {verifications.get()>beforeVerify &&
+                repository.visualRules.value.any {it.packageName==beta && it.successfulSessions()>=3}}
         } finally {
             leave()
             repository.updateSettings {it.copy(enabled=false,cloudEnabled=false,packages=emptySet())}

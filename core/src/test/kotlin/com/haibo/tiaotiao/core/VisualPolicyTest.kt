@@ -18,6 +18,29 @@ class VisualPolicyTest {
         assertNull(VisualPolicy.clickableTarget(screen.copy(nodes=listOf(full)),area))
         assertNull(VisualPolicy.clickableTarget(s.copy(nodes=listOf(control,control.copy(path="0.2"))),area))
     }
+    @Test fun `a visual touch target never substitutes an unproven native action`() {
+        val node=ScreenNode("0.1","","android.widget.Button","关闭",true,area)
+        val current=screen.copy(nodes=listOf(node))
+        assertNull(VisualPolicy.nativeTarget(rule.copy(tapMethod=TapMethod.GESTURE),current,area))
+        val selector=TargetSelector(node.path,node.resourceId,node.className,node.label,node.bounds)
+        val native=rule.copy(tapMethod=TapMethod.ACCESSIBILITY,nodeTarget=selector)
+        assertEquals(node,VisualPolicy.nativeTarget(native,current,area))
+        assertNull(VisualPolicy.nativeTarget(native,current.copy(nodes=listOf(node.copy(resourceId="other:id/control"))),area))
+    }
+    @Test fun `action migration retries an inconclusive image click but preserves user and AI rejections`() {
+        val old=VisualPolicy.record(VisualPolicy.record(rule,"one",true,true,true,1),"two",true,true,true,2)
+        val migrated=VisualPolicy.migrateExecution(old)
+        assertEquals(TapMethod.GESTURE,migrated.tapMethod)
+        assertFalse(migrated.active())
+        assertTrue(migrated.evidence.isEmpty())
+        assertNotEquals(old.behavior(),migrated.behavior())
+        assertEquals(migrated,VisualPolicy.migrateExecution(migrated))
+        val ineffective=rule.copy(state=VisualRuleState.PAUSED,automaticFailures=1,lastResult="广告或目标仍存在，已暂停")
+        assertEquals(VisualRuleState.CANDIDATE,VisualPolicy.migrateExecution(ineffective).state)
+        listOf("用户停用","自动检查未通过，等待重新识别").forEach {
+            assertEquals(VisualRuleState.PAUSED,VisualPolicy.migrateExecution(ineffective.copy(lastResult=it)).state)
+        }
+    }
     @Test fun `a candidate can be attempted without asking a person but needs fresh ad evidence`() {
         assertTrue(VisualPolicy.canAttempt(rule, screen, ad, rule.targetHash))
         assertFalse(VisualPolicy.canAttempt(rule, screen, ad.copy(advertisement = false, countdown = null), rule.targetHash))

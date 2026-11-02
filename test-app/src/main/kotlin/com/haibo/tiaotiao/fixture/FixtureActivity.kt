@@ -16,7 +16,7 @@ class FixtureActivity : Activity() {
     private var ended=false
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
-        if(intent.getBooleanExtra("canvas",false)) {setContentView(ImageAdvertisement());return}
+        if(intent.getBooleanExtra("canvas",false)) {imagePage(intent.getBooleanExtra("inert",false));return}
         val login=intent.getBooleanExtra("login",false)
         val root=FrameLayout(this).apply {setBackgroundColor(Color.rgb(228,240,232))}
         fun dp(value: Int)=(value*resources.displayMetrics.density).toInt()
@@ -62,8 +62,32 @@ class FixtureActivity : Activity() {
         setContentView(root)
         root.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
     }
-    /** No accessible controls, advertisement/skip labels, or visible countdown. */
-    private inner class ImageAdvertisement : View(this@FixtureActivity) {
+    private fun imagePage(inert: Boolean) {
+        val image=ImageAdvertisement(inert)
+        val root=FrameLayout(this).apply {addView(image,FrameLayout.LayoutParams(-1,-1))}
+        if(inert) {
+            val close=object : Button(this) {
+                override fun performAccessibilityAction(action: Int,args: Bundle?): Boolean {
+                    if(action==android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK) {
+                        val file=File(filesDir,"native_attempts")
+                        file.writeText(((file.takeIf {it.exists()}?.readText()?.toIntOrNull() ?: 0)+1).toString())
+                        return true // Some ad SDKs accept accessibility clicks but only handle touch.
+                    }
+                    return super.performAccessibilityAction(action,args)
+                }
+            }.apply {
+                text="";contentDescription="关闭";setBackgroundColor(Color.TRANSPARENT)
+                setOnClickListener {image.closeFromTouch();visibility=View.GONE}
+            }
+            val m=resources.displayMetrics
+            root.addView(close,FrameLayout.LayoutParams((m.widthPixels*.11f).toInt(),(m.heightPixels*.07f).toInt(),Gravity.TOP or Gravity.END).apply {
+                rightMargin=(m.widthPixels*.04f).toInt();topMargin=(m.heightPixels*.035f).toInt()
+            })
+        }
+        setContentView(root)
+    }
+    /** Optional inert accessibility target; actual control always handles touch. */
+    private inner class ImageAdvertisement(private val otherClose: Boolean) : View(this@FixtureActivity) {
         private var remaining=8
         private var showing=true
         private val paint=android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
@@ -83,13 +107,18 @@ class FixtureActivity : Activity() {
             } else {
                 paint.color=Color.BLACK;paint.textSize=64f
                 c.drawText("首页",width*.13f,height*.9f,paint);c.drawText("我的",width*.7f,height*.9f,paint)
+                if(otherClose) c.drawText("×",width*.45f,height*.4f,paint)
             }
+        }
+        fun closeFromTouch() {
+            if(!showing) return
+            val file=File(filesDir,"clicks");val n=file.takeIf {it.exists()}?.readText()?.toIntOrNull() ?: 0
+            file.writeText((n+1).toString());showing=false;invalidate()
+            sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
         }
         override fun onTouchEvent(e: android.view.MotionEvent): Boolean {
             if(showing && e.action==android.view.MotionEvent.ACTION_UP && e.x>width*.8f && e.y<height*.14f) {
-                val file=File(filesDir,"clicks");val n=file.takeIf {it.exists()}?.readText()?.toIntOrNull() ?: 0
-                file.writeText((n+1).toString());showing=false;invalidate()
-                sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+                closeFromTouch()
             }
             return true
         }

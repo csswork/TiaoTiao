@@ -57,7 +57,7 @@ class VisualLearner(context: Context, private val repository: AppRepository,
                 if (!nodeAllowed(screen.packageName) || currentSettings.model!=settings.model || currentSettings.jevProvider!=settings.jevProvider) return@withPermit
                 if (target!=null) {
                     saveProposal(VisualRule(packageName=screen.packageName,versionCode=screen.versionCode,
-                        scene=AdRecognition.scene(screen),sceneVersion=2,target=target.bounds,targetHash="0".repeat(64),
+                        scene=AdRecognition.scene(screen),sceneVersion=2,target=target.bounds,targetHash="0".repeat(64),tapMethod=TapMethod.ACCESSIBILITY,
                         nodeTarget=TargetSelector(target.path,target.resourceId,target.className,target.label,target.bounds),
                         nodeScene=AdRecognition.nodeScene(screen),
                         label=if(SignalText.hasSkip(target.label)) "skip" else "close_ad",
@@ -141,7 +141,7 @@ class VisualLearner(context: Context, private val repository: AppRepository,
                     val frame = VisualFrame(p.screen,bitmap,VisualSignals(false,null,emptyList(),false),image,0)
                     val hash = frame.use { it.patch(area) }
                     val rule = VisualRule(packageName=p.screen.packageName,versionCode=p.screen.versionCode,scene=AdRecognition.scene(p.screen),sceneVersion=2,
-                        target=area,targetHash=hash,label=decision.label,source="vercel:${p.model}",createdAt=System.currentTimeMillis(),contextHash=p.contextHash)
+                        target=area,targetHash=hash,label=decision.label,source="vercel:${p.model}",createdAt=System.currentTimeMillis(),contextHash=p.contextHash,tapMethod=TapMethod.GESTURE)
                     saveProposal(rule)
                     repository.reportDetection(p.screen.packageName,"视觉方案已缓存（${elapsed} ms）；当前或下次匹配时自动尝试，无需人工确认")
                 }

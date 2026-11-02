@@ -75,7 +75,7 @@ class SkipAccessibilityService : AccessibilityService() {
             visualWindow()
         },
         open = { generation, pkg -> repository.settings.value.enabled && gate.generation == generation && gate.isOpen(pkg,SystemClock.elapsedRealtime()) },
-        tap = { generation, screen, area -> smartTap(generation,screen,area) }).also { autoLearning = it }
+        tap = { generation, screen, area, rule -> smartTap(generation,screen,area,rule) }).also { autoLearning = it }
     private val reportedReasons = mutableSetOf<String>()
     private fun report(pkg: String, reason: String, message: String) {
         if (diagnosticPackage != pkg) { diagnosticPackage = pkg; reportedReasons.clear() }
@@ -458,13 +458,13 @@ class SkipAccessibilityService : AccessibilityService() {
             }
         }
     }
-    private suspend fun smartTap(generation: Long, screen: ScreenSnapshot, area: Area): Boolean {
+    private suspend fun smartTap(generation: Long, screen: ScreenSnapshot, area: Area, rule: VisualRule): Boolean {
         if (!repository.settings.value.enabled || gate.generation != generation || !gate.isOpen(screen.packageName,SystemClock.elapsedRealtime())) return false
         val fresh=visualWindow() ?: return false
         if(fresh.windowId!=screen.windowId || AdRecognition.scene(fresh)!=AdRecognition.scene(screen) || !area.valid() ||
             area.right-area.left>.4f || area.bottom-area.top>.18f) return false
         if(!AdRecognition.eligible(screen.packageName,repository.settings.value.packages,packageName,repository.settings.value.automaticLearning) && !visualDemo(screen)) return false
-        val node=VisualPolicy.clickableTarget(fresh,area)
+        val node=VisualPolicy.nativeTarget(rule,fresh,area)
         val handle=node?.let {nodeObservation?.handles?.get(it.path)}?.let {
             @Suppress("DEPRECATION") AccessibilityNodeInfo.obtain(it)
         }
@@ -472,11 +472,16 @@ class SkipAccessibilityService : AccessibilityService() {
             gate.dispatched()
             val accepted=try {withContext(Dispatchers.IO) {handle.performAction(AccessibilityNodeInfo.ACTION_CLICK)}}
                 finally {@Suppress("DEPRECATION") handle.recycle()}
-            repository.reportDetection(screen.packageName,if(accepted) "AI 目标已关联当前原生控件并发起关闭" else "原生控件未接受关闭，已停止本轮")
+            repository.reportDetection(screen.packageName,if(accepted) "已对 Jev 选中的原生控件发起关闭，等待结果检查" else "原生控件未接受关闭，已停止本轮")
             return accepted
+        }
+        if(rule.tapMethod==TapMethod.ACCESSIBILITY) {
+            repository.reportDetection(screen.packageName,"Jev 目标控件已变化，未替换成坐标盲点")
+            return false
         }
         val x=(area.left+area.right)/2;val y=(area.top+area.bottom)/2
         if(AdRecognition.candidates(fresh).count {x in it.bounds.left..it.bounds.right && y in it.bounds.top..it.bounds.bottom}>1) return false
+        repository.reportDetection(screen.packageName,"按视觉方案触控关闭位置（${(x*100).toInt()}%,${(y*100).toInt()}%），等待结果检查")
         gate.dispatched()
         val path = Path().apply { moveTo((area.left+area.right)/2*screen.width,(area.top+area.bottom)/2*screen.height) }
         val gesture = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path,0,60)).build()

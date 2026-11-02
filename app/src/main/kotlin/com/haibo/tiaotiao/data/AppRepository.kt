@@ -49,7 +49,7 @@ class AppRepository(private val context: Context) {
     val vault = SecretVault(context)
     private val visualFile = AtomicFile(File(context.filesDir, "visual_rules.json"))
     private val _visualRules = MutableStateFlow(runCatching {
-        VisualPolicy.decode(String(visualFile.readFully(), Charsets.UTF_8)).rules
+        VisualPolicy.decode(String(visualFile.readFully(), Charsets.UTF_8)).rules.map(VisualPolicy::migrateExecution)
     }.getOrElse {
         if (visualFile.baseFile.exists()) visualFile.baseFile.copyTo(File(context.filesDir,"visual_rules.recovery.json"),overwrite=true)
         emptyList()
