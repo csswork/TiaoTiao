@@ -13,7 +13,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
     private val tap: suspend (Long,ScreenSnapshot,Area,VisualRule,Boolean) -> Boolean) {
     private val app get() = service.application as TiaoApplication
     private val repository get() = app.repository
-    private val capture = VisualCapture(service)
+    private val capture = VisualCapture(service) {service.bubbleBounds()}
     private var generation = -1L
     private var sessionStarted=0L
     private var session = ""
@@ -144,7 +144,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
             val stable = skip != null && previousSkip?.near(skip)==true
             previousSkip=skip
             val explicit=VisualExecution.explicitTarget(frame.signals,previousExplicit)
-            previousExplicit=if(frame.signals.advertisement) frame.signals.explicitSkips.singleOrNull() else null
+            previousExplicit=if(frame.signals.home) null else VisualExecution.singleControl(frame.signals.explicitSkips)
             val matches = repository.visualRules.value.filter { AdRecognition.matchesScene(it,screen) && it.state!=VisualRuleState.PAUSED }
                 .filter { it.active() || nodeReady || cloudReady || demo(screen) }
                 .filter {demo(screen) || app.visualLearner.matchesBackend(it)}
@@ -167,7 +167,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     if(fresh!=null) {
                         repository.putVisual(fresh);rule=fresh
                         repository.savePreview(fresh,frame.jpeg,explicit,com.haibo.tiaotiao.data.PreviewKind.RECOGNITION)
-                        repository.reportDetection(screen.packageName,"广告标志和文字跳过已跨帧确认，使用当前控件位置；结果仍由 AI 检查")
+                        repository.reportDetection(screen.packageName,"边角文字跳过已跨帧确认，使用当前控件位置；结果仍由 AI 检查")
                     }
                 }
             }
@@ -214,7 +214,9 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     return
                 }
                 val baseline=repository.visualBaseline(rule.behavior())
-                if (!demo(screen) && !rule.active() && frame.signals.countdown==null && baseline==0L && rule.evidence.any { it.timingBasis=="unknown" }) {
+                if (!demo(screen) && VisualPolicy.observeNaturalEnding(rule,frame.signals.countdown,baseline,repository.baselineObservations(rule.behavior()))) {
+                    // Count the session up front: an observation that never yields a baseline must not block clicking forever.
+                    repository.recordBaselineObservation(rule.behavior())
                     baselineRule=rule;baselineBefore=frame.jpeg;baselineReference=frame.patch(Area(.05f,.12f,.95f,.88f))
                     baselineLastAdAt=frame.at
                     repository.reportDetection(screen.packageName,"本轮自动观察自然结束，不点击；即使首页有关闭标记也由 AI 检查")
@@ -272,7 +274,8 @@ class AutoLearning(private val service: SkipAccessibilityService,
                         if(owner==null || owner.windowId!=snapshot.windowId) {observed.close();continue}
                         val retryTarget=VisualExecution.retryTarget(chosen,screen,snapshot,actualArea,observed.signals,
                             frame.difference(observed),observed.at-tapAt,tapCount,nativeFallback=
-                                service.touchExecutions.lastOrNull {it.ruleId==chosen.id}?.backend=="原生控件" && app.enhancedTouch.ownedReady)
+                                // Node rules touch coordinates first; their learned node's ACTION_CLICK is the one retry.
+                                chosen.tapMethod==TapMethod.ACCESSIBILITY)
                         val retryUnchanged=retryTarget!=null && try {capture.targetUnchanged(observed,retryTarget)}
                             catch(c: CancellationException) {throw c} catch(_: Exception) {false}
                         if(retryTarget!=null && retryUnchanged && repository.visualRules.value.any {it.id==chosen.id && it.behavior()==chosen.behavior() && !VisualPolicy.userPaused(it)}) {
@@ -363,13 +366,23 @@ class AutoLearning(private val service: SkipAccessibilityService,
                         if(paused.targetHash.count {it=='1'} in 4..60) frame.targetPatch(paused.target) else "",frame.patch(Area(.05f,.12f,.95f,.88f)))
                 }
                 if(waiting) {service.checkStatus(screen.packageName,"目标正在等待重新检查",true);return}
-                if(explicit==null && frame.signals.advertisement && frame.signals.explicitSkips.size==1 &&
+                if(explicit==null && VisualExecution.singleControl(frame.signals.explicitSkips)!=null &&
                     SystemClock.elapsedRealtime()-sessionStarted<1600) return
                 inspectNodes(screen,gen,true)
                 if(queued>=4) return
                 if (app.visualLearner.enqueue(frame)) { queued++;imageQueued++;nextLearnAt=SystemClock.elapsedRealtime()+900;service.checkStatus(screen.packageName,"正在识别广告") }
             }
         }
+    }
+    /** Whether the current app screen shows its bottom navigation (a home page); null when it cannot be captured. */
+    suspend fun homeVisible(): Boolean? {
+        // Window ownership can lag right after the app is brought back to the front.
+        repeat(4) {attempt ->
+            if(attempt>0) delay(400)
+            val screen=currentWindow() ?: return@repeat
+            try {return capture.capture(screen,display=true).use {it.signals.home}} catch(c: CancellationException) {throw c} catch(_: Exception) {}
+        }
+        return null
     }
     fun close() = capture.close()
 }

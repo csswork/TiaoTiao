@@ -4,14 +4,23 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class VisualExecutionTest {
-    @Test fun `explicit fast path needs ad evidence and a stable edge skip in both frames`() {
+    @Test fun `explicit fast path needs a stable edge skip in both frames but no ad badge`() {
         val signals=VisualSignals(true,null,listOf(area),false,listOf(area))
         assertEquals(area,VisualExecution.explicitTarget(signals,area))
         assertNull(VisualExecution.explicitTarget(signals,null))
-        assertNull(VisualExecution.explicitTarget(signals.copy(advertisement=false),area))
+        assertEquals(area,VisualExecution.explicitTarget(signals.copy(advertisement=false),area))
         assertNull(VisualExecution.explicitTarget(signals.copy(explicitSkips=emptyList()),area))
         assertNull(VisualExecution.explicitTarget(signals.copy(home=true),area))
         assertNull(VisualExecution.explicitTarget(signals.copy(explicitSkips=listOf(area,Area(.1f,.8f,.2f,.85f))),area))
+        assertNull(VisualExecution.explicitTarget(signals.copy(explicitSkips=listOf(Area(.4f,.45f,.6f,.5f))),Area(.4f,.45f,.6f,.5f)))
+    }
+    @Test fun `nested OCR and node boxes of one skip collapse to the tightest box`() {
+        // Observed on a carrier app: an OCR line inside the pill-shaped node bounds.
+        val text=Area(.83f,.934f,.904f,.95f);val pill=Area(.778f,.9225f,.958f,.9625f)
+        assertEquals(text,VisualExecution.singleControl(listOf(pill,text)))
+        assertEquals(text,VisualExecution.explicitTarget(VisualSignals(false,null,listOf(pill,text),false,listOf(pill,text)),text))
+        assertNull(VisualExecution.singleControl(listOf(text,Area(.1f,.05f,.2f,.08f))))
+        assertNull(VisualExecution.singleControl(emptyList()))
     }
     private val area=Area(.88f,.04f,.97f,.08f)
     @Test fun `calibration cannot jump to a nearby nonoverlapping control`() {
@@ -31,8 +40,14 @@ class VisualExecutionTest {
         assertNull(retry(after=screen.copy(windowId=2)))
         assertNull(retry(signals=ad.copy(home=true)))
         assertNull(retry(signals=ad.copy(advertisement=false)))
+        assertEquals(area,retry(signals=ad.copy(advertisement=false,explicitSkips=listOf(area))))
         assertNull(retry(signals=ad.copy(skips=emptyList())))
         assertNull(retry(difference=.1));assertNull(retry(elapsed=300));assertNull(retry(elapsed=3000));assertNull(retry(attempts=2))
+    }
+    @Test fun `an ignored native click may fall back to one coordinate touch`() {
+        val native=rule.copy(tapMethod=TapMethod.ACCESSIBILITY)
+        assertNull(VisualExecution.retryTarget(native,screen,screen,area,ad,0.0,1000,1))
+        assertEquals(area,VisualExecution.retryTarget(native,screen,screen,area,ad,0.0,1000,1,nativeFallback=true))
     }
     @Test fun `session permits at most one bounded retry and no third click`() {
         val gate=SessionGate();gate.observe(screen.packageName,1000)

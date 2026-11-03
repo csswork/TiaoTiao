@@ -4,7 +4,11 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.app.KeyguardManager
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import androidx.core.content.ContextCompat
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.os.PowerManager
@@ -33,6 +37,10 @@ import java.lang.ref.WeakReference
 class SkipAccessibilityService : AccessibilityService() {
     companion object {
         internal const val GESTURE_PRESS_MS=100L
+        /** MIUI/HyperOS asks before one app opens another; shake/flip launch ads trigger it without any touch. */
+        private const val WAKEPATH_PACKAGE="com.miui.securitycenter"
+        private const val JUMP_WINDOW_MS=15_000L
+        private const val SENSOR_PAUSE_MS=10_000L
         @Volatile private var serviceRef = WeakReference<SkipAccessibilityService>(null)
         val instance: SkipAccessibilityService? get() = serviceRef.get()
     }
@@ -44,6 +52,7 @@ class SkipAccessibilityService : AccessibilityService() {
     private var pairingAssistant: com.haibo.tiaotiao.touch.WirelessPairingAssistant?=null
     private var bubbleSession: Pair<String,Long>?=null
     internal val diagnosticBubbleVisible get()=checkBubble.visible
+    internal fun bubbleBounds()=checkBubble.bounds
     internal val diagnosticBubbleShows get()=checkBubble.shows
     internal fun checkStatus(pkg: String,text: String,finished: Boolean=false) {
         if(text!="正在检查" || finished) return
@@ -110,6 +119,138 @@ class SkipAccessibilityService : AccessibilityService() {
         },
         open = { generation, pkg -> repository.settings.value.enabled && gate.generation == generation && gate.isOpen(pkg,SystemClock.elapsedRealtime()) },
         tap = { generation, screen, area, rule, retry -> smartTap(generation,screen,area,rule,retry) }).also { autoLearning = it }
+    /** The selected app's launch session: generation, package and start time. Activity classes it showed since. */
+    private var launchSession: Triple<Long,String,Long>?=null
+    private val launchClasses=mutableListOf<Pair<String,Long>>()
+    private var jumpUntil=0L
+    private var jumpBack: Job?=null
+    private var jumpBackDone=false
+    private var jumpRecorded: Long?=null
+    private var jumpRecovered: Long?=null
+    /** Newest activity class per selected app; unlike launchClasses it survives the app's session being replaced. */
+    private val lastClass=mutableMapOf<String,String>()
+    private fun sessionObserved(pkg: String) {
+        if(pkg==packageName || pkg !in repository.settings.value.packages || launchSession?.first==gate.generation) return
+        launchSession=Triple(gate.generation,pkg,SystemClock.elapsedRealtime());launchClasses.clear();jumpBackDone=false
+        val touch=(application as TiaoApplication).enhancedTouch
+        // Prevention needs the shell service; refusing the dialog afterwards (below) works without it.
+        if(repository.adJumps.known(pkg) && repository.settings.value.enhancedTouch && touch.ownedReady) scope.launch {
+            if(touch.pauseSensors(pkg,SENSOR_PAUSE_MS)) repository.log(pkg,"此应用的开屏广告曾自行跳转，开屏 ${SENSOR_PAUSE_MS/1000} 秒内已暂停其传感器")
+        }
+    }
+    private suspend fun label(pkg: String)=withContext(Dispatchers.IO) {runCatching {
+        @Suppress("DEPRECATION") packageManager.getApplicationInfo(pkg,0).loadLabel(packageManager).toString()
+    }.getOrNull()}
+    /** A landing page is the newest activity of the app, opened shortly before the jump and after its launch screen. */
+    private fun landingClass(now: Long)=launchClasses.lastOrNull()?.takeIf {now-it.second<4000 && launchClasses.any {c ->c.first!=it.first}}?.first
+    private fun recordJump(source: String,target: String,how: String) {
+        // An ad may ask twice in one launch; count the launch once.
+        if(jumpRecorded==launchSession?.first) return
+        jumpRecorded=launchSession?.first
+        repository.adJumps.record(source,target)
+        repository.reportDetection(source,"开屏广告未经点击就要打开「$target」（摇一摇/翻转类广告），$how")
+    }
+    private fun interceptAdJump() {
+        val (_,source,startedAt)=launchSession ?: return
+        val now=SystemClock.elapsedRealtime()
+        if(now-startedAt>JUMP_WINDOW_MS) return
+        jumpUntil=now+3000
+        val landing=landingClass(now)
+        scope.launch {
+            val label=label(source) ?: return@launch
+            // A second dialog may stack on one that is still closing; retry briefly instead of giving up.
+            var refusal: Pair<String,android.graphics.Rect?>?=null
+            for(attempt in 0 until 8) {
+                delay(if(attempt==0) 150 else 200)
+                refusal=withContext(Dispatchers.IO) {refuseJump(label)}
+                if(refusal!=null) break
+            }
+            val (target,fallback)=refusal ?: run {repository.log(source,"出现应用跳转确认，但来源不是「$label」或找不到“拒绝”，未处理");return@launch}
+            fallback?.let {dispatchTouch(it.centerX(),it.centerY())}
+            touchJournal.record("JUMP","ad_jump_refused",source,details=mapOf("target" to target,"landing" to landing.orEmpty()))
+            recordJump(source,target,"已自动拒绝")
+            leaveLanding(source,label)
+        }
+    }
+    /** Without a system dialog (target already running) the other app simply comes to the front. Bring the launch app
+     * back; the caller has checked that it was in front just before and is within its launch window. */
+    private fun recoverDirectJump(source: String,targetPackage: String) {
+        if(jumpRecovered==launchSession?.first) return
+        jumpRecovered=launchSession?.first
+        val landing=landingClass(SystemClock.elapsedRealtime())
+        val seen=launchClasses.joinToString(">") {it.first.substringAfterLast('.')}
+        jumpUntil=SystemClock.elapsedRealtime()+6000
+        scope.launch {
+            val label=label(source) ?: return@launch
+            val target=label(targetPackage) ?: targetPackage
+            val launch=packageManager.getLaunchIntentForPackage(source)?.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) ?: return@launch
+            // Deep links route through a loading page and then take the front again; let that settle, then verify.
+            for(attempt in 0 until 2) {
+                delay(if(attempt==0) 700 else 1500)
+                val front=withContext(Dispatchers.IO) {runCatching {selectedWindow(windows)?.root?.packageName?.toString()}.getOrNull()}
+                if(attempt>0 && front==source) break
+                runCatching {startActivity(launch)}.onFailure {repository.log(source,"开屏广告打开了「$target」，未能返回「$label」");return@launch}
+                touchJournal.record("JUMP","ad_jump_returned",source,details=mapOf("target" to targetPackage,"landing" to landing.orEmpty(),"seen" to seen,"attempt" to attempt.toString()))
+            }
+            jumpUntil=SystemClock.elapsedRealtime()+1500
+            recordJump(source,target,"已返回「$label」")
+            leaveLanding(source,label)
+        }
+    }
+    private fun leaveLanding(source: String,label: String) {
+        if(jumpBackDone) return
+        jumpBack?.cancel()
+        jumpBack=scope.launch {
+            delay(900)
+            val stillDialog=withContext(Dispatchers.IO) {windows.any {w -> runCatching {w.root?.packageName==WAKEPATH_PACKAGE}.getOrDefault(false)}}
+            if(stillDialog || jumpBackDone || knownOwner?.second!=source) return@launch
+            // Activity events are unreliable here, so look: an ad landing page lacks the app's bottom navigation.
+            val home=if(android.os.Build.VERSION.SDK_INT>=30) learning().homeVisible() else null
+            touchJournal.record("JUMP",if(home==false) "landing_left" else "landing_kept",source,details=mapOf("home" to home.toString()))
+            if(home!=false) return@launch
+            jumpBackDone=true
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            repository.log(source,"已从广告落地页返回「$label」")
+        }
+    }
+    /** The launch app itself handed the screen to another app (not the launcher) inside its launch window. */
+    private fun checkDirectJump(previousOwner: String?,owner: String) {
+        // TiaoTiao's own return to the launch app (and the jump target's brief session) is not another jump.
+        val session=launchSession ?: return
+        if(previousOwner==session.second && SystemClock.elapsedRealtime()<jumpUntil) {
+            touchJournal.record("JUMP","jump_check_suppressed",session.second,details=mapOf("owner" to owner));return
+        }
+        if(previousOwner!=session.second || SystemClock.elapsedRealtime()-session.third>JUMP_WINDOW_MS || owner in homePackages ||
+            // System choosers, permission prompts and security dialogs are the app's own flow, not an ad jump.
+            owner in setOf("android","com.android.systemui",WAKEPATH_PACKAGE,packageName) || owner.contains("permissioncontroller") ||
+            owner.startsWith("com.miui.") || owner.startsWith("com.xiaomi.")) return
+        recoverDirectJump(session.second,owner)
+    }
+    private val homePackages by lazy {
+        packageManager.queryIntentActivities(android.content.Intent(android.content.Intent.ACTION_MAIN).addCategory(android.content.Intent.CATEGORY_HOME),0)
+            .map {it.activityInfo.packageName}.toSet()
+    }
+    /** Clicks "拒绝" only when a dialog names the launch app as the one asking. Returns the requested app's name,
+     * plus the button bounds when ACTION_CLICK was not accepted and a gesture is needed instead. */
+    private fun refuseJump(label: String): Pair<String,android.graphics.Rect?>? {
+        for(root in windows.mapNotNull {runCatching {it.root}.getOrNull()}.filter {it.packageName==WAKEPATH_PACKAGE}) {
+            val title=root.findAccessibilityNodeInfosByText("想要打开").firstOrNull()?.text?.toString()?.trim() ?: continue
+            if(!title.startsWith(label)) continue
+            val target=title.substringAfter("想要打开").substringBefore('，').substringBefore(',').trim().ifBlank {"其他应用"}
+            val refuse=root.findAccessibilityNodeInfosByText("拒绝").firstOrNull {it.text?.toString()?.trim()=="拒绝" && it.isClickable && it.isVisibleToUser} ?: continue
+            if(refuse.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return target to null
+            return target to android.graphics.Rect().also(refuse::getBoundsInScreen)
+        }
+        return null
+    }
+    private var screenReceiver=false
+    // The foreground package does not change across screen-off/unlock, but its hot-start splash is a new session.
+    private val screenOff=object : BroadcastReceiver() {
+        override fun onReceive(context: Context,intent: Intent) {
+            scanJob?.cancel();nodeRead?.cancel();gate.reset();hideOverlay();checkBubble.hide();bubbleSession=null
+            clearNodes();nextNodeRead=0
+        }
+    }
     private val reportedReasons = mutableSetOf<String>()
     private fun report(pkg: String, reason: String, message: String) {
         if (diagnosticPackage != pkg) { diagnosticPackage = pkg; reportedReasons.clear() }
@@ -122,6 +263,10 @@ class SkipAccessibilityService : AccessibilityService() {
         serviceRef = WeakReference(this)
         repository.connected.value = true
         repository.log("", "无障碍服务已连接")
+        if(!screenReceiver) {
+            ContextCompat.registerReceiver(this,screenOff,IntentFilter(Intent.ACTION_SCREEN_OFF),ContextCompat.RECEIVER_NOT_EXPORTED)
+            screenReceiver=true
+        }
         pairingAssistant?.close()
         pairingAssistant=com.haibo.tiaotiao.touch.WirelessPairingAssistant(this,scope,(application as TiaoApplication).wirelessBootstrap)
         (application as TiaoApplication).visualLearner.resume()
@@ -148,6 +293,15 @@ class SkipAccessibilityService : AccessibilityService() {
             return
         }
         val eventPackage = event.packageName?.toString().orEmpty()
+        if(eventPackage==WAKEPATH_PACKAGE && event.eventType==AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            event.className?.toString()?.contains("wakepath")==true) {
+            // A system "app wants to open another app" dialog is not the launch session leaving its app.
+            interceptAdJump();return
+        }
+        if(event.eventType==AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) event.className?.toString()?.let {
+            if(eventPackage==launchSession?.second) {launchClasses+=it to SystemClock.elapsedRealtime();if(launchClasses.size>12) launchClasses.removeAt(0)}
+            if(eventPackage in repository.settings.value.packages) lastClass[eventPackage]=it
+        }
         if(dashboardVisible()) {
             ignoredDashboardEvents++
             stopDashboardScan()
@@ -165,13 +319,19 @@ class SkipAccessibilityService : AccessibilityService() {
                 if(knownOwner?.second!=eventPackage) {autoLearning?.leaving(eventPackage);scanJob?.cancel()}
                 nodeRead?.cancel();nextNodeRead=0;clearNodes();cachedVersion=null
             }
+            val previousOwner=knownOwner?.second
             knownOwner=appWindow.id to eventPackage;ownerRevision++
             if(eventPackage in repository.settings.value.packages || eventPackage==packageName) {
                 eventWindowId=appWindow.id
                 if(targetEventPackage!=eventPackage) cachedVersion=null
                 targetEventPackage=eventPackage;targetEventAt=SystemClock.elapsedRealtime()
+                // Ad jumps usually land in shopping apps that are themselves selected (JD, Taobao); check before
+                // the target's own launch session replaces the source's.
+                if(event.eventType==AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && previousOwner!=eventPackage) checkDirectJump(previousOwner,eventPackage)
                 gate.observeWindow(eventPackage,true,targetEventAt)
+                sessionObserved(eventPackage)
             } else {
+                if(event.eventType==AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) checkDirectJump(previousOwner,eventPackage)
                 autoLearning?.leaving(eventPackage)
                 scanJob?.cancel();gate.observeWindow(eventPackage,true,SystemClock.elapsedRealtime());hideOverlay();checkBubble.hide()
                 targetEventPackage=null;clearNodes();cachedVersion=null
@@ -235,7 +395,10 @@ class SkipAccessibilityService : AccessibilityService() {
                 try {root?.packageName?.toString()} finally {@Suppress("DEPRECATION") root?.recycle()}
             }} catch(c: CancellationException) {throw c} catch(_: Exception) {null} ?: return@launch
             if(ownerRevision!=revision || selectedWindow(windows)?.id!=window.id) return@launch
+            // Keep the launch session (and its landing-page record) while the jump dialog is being refused.
+            if(owner==WAKEPATH_PACKAGE && SystemClock.elapsedRealtime()<jumpUntil) return@launch
             if(knownOwner?.second!=owner) {
+                checkDirectJump(knownOwner?.second,owner)
                 autoLearning?.leaving(owner);scanJob?.cancel();nodeRead?.cancel()
                 clearNodes();cachedVersion=null;nextNodeRead=0
             }
@@ -366,6 +529,7 @@ class SkipAccessibilityService : AccessibilityService() {
             if(screen!=null && (visualDemo(screen) || AdRecognition.eligible(screen.packageName,repository.settings.value.packages,packageName,repository.settings.value.automaticLearning))) {
                 val now=SystemClock.elapsedRealtime()
                 gate.observe(screen.packageName,now)
+                sessionObserved(screen.packageName)
                 if(!gate.isOpen(screen.packageName,now)) return
                 if(bubbleSession!=(screen.packageName to gate.generation)) {
                     bubbleSession=screen.packageName to gate.generation
@@ -537,14 +701,16 @@ class SkipAccessibilityService : AccessibilityService() {
         val recentNodes=nodeObservation?.takeIf {it.screen.packageName==fresh.packageName && it.screen.windowId==fresh.windowId &&
             SystemClock.elapsedRealtime()-nodeSnapshotAt<1500}
         val nativeTarget=VisualPolicy.nativeTarget(rule,if(fresh.complete) fresh else recentNodes?.screen ?: fresh,area)
-        if(rule.tapMethod==TapMethod.ACCESSIBILITY && nativeTarget==null) return reject("native_target_missing",mapOf(
-            "freshComplete" to fresh.complete.toString(),"nodeAgeMs" to (now-nodeSnapshotAt).toString(),"recentNodes" to (recentNodes!=null).toString()))
+        // Node trees of launch ads are often rebuilt or hidden; the rule's learned bounds (already matched on the
+        // current frame by the caller) still locate a coordinate touch, so a missing node no longer cancels the action.
+        if(rule.tapMethod==TapMethod.ACCESSIBILITY && nativeTarget==null) touchJournal.record("PRECHECK","native_target_missing",screen.packageName,rule.id,details=mapOf(
+            "freshComplete" to fresh.complete.toString(),"nodeAgeMs" to (now-nodeSnapshotAt).toString(),"recentNodes" to (recentNodes!=null).toString(),"fallback" to "coordinate"))
         if(rule.tapMethod==TapMethod.ACCESSIBILITY && nativeTarget!=null &&
             (x !in nativeTarget.bounds.left..nativeTarget.bounds.right || y !in nativeTarget.bounds.top..nativeTarget.bounds.bottom)) return reject("native_point_outside")
-        // Preserve a rule's native close action. Enhanced coordinates are a guarded fallback,
-        // rather than replacing every accessible close control with a synthetic touch.
-        if(retry && rule.tapMethod==TapMethod.ACCESSIBILITY && !useEnhanced) return reject("native_fallback_unavailable")
-        val node=if(rule.tapMethod==TapMethod.ACCESSIBILITY && !retry) nativeTarget else if(useEnhanced) null else nativeTarget
+        // The first touch is always a coordinate touch (enhanced injection, else an accessibility gesture). Device trials
+        // on two ad SDKs: the gesture closed every ad, while ACTION_CLICK was ignored by one of them. ACTION_CLICK on
+        // the learned node remains the single guarded retry for node rules after the screen was observed unchanged.
+        val node=if(retry && rule.tapMethod==TapMethod.ACCESSIBILITY) nativeTarget else null
         val handle=node?.let {recentNodes?.handles?.get(it.path)}?.let {
             @Suppress("DEPRECATION") AccessibilityNodeInfo.obtain(it)
         }
@@ -568,10 +734,6 @@ class SkipAccessibilityService : AccessibilityService() {
             repository.reportDetection(screen.packageName,if(accepted) "已对 Jev 选中的原生控件发起关闭，等待结果检查" else "原生控件未接受关闭，已停止本轮")
             return accepted
         }
-        if(rule.tapMethod==TapMethod.ACCESSIBILITY && !useEnhanced) {
-            repository.reportDetection(screen.packageName,"Jev 目标控件已变化，未替换成坐标盲点")
-            return reject("native_handle_unavailable")
-        }
         if(AdRecognition.candidates(fresh).count {x in it.bounds.left..it.bounds.right && y in it.bounds.top..it.bounds.bottom}>1) return reject("ambiguous_target")
         gate.dispatched()
         val touchStarted=SystemClock.elapsedRealtime()
@@ -589,9 +751,42 @@ class SkipAccessibilityService : AccessibilityService() {
             if(result.completed) "系统执行完成，等待检查广告是否提前关闭" else "执行未完成：${com.haibo.tiaotiao.touch.touchReason(report?.reason ?: "gesture_failed")}；本轮不改用其他通道补点")
         return result.completed
     }
-    private suspend fun dispatchTouch(x: Int,y: Int): Boolean = withContext(NonCancellable) {
-        val path=Path().apply {moveTo(x.toFloat(),y.toFloat())}
-        val gesture=GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path,0,GESTURE_PRESS_MS))
+    private suspend fun dispatchTouch(x: Int,y: Int): Boolean=dispatchStroke(listOf(x.toFloat() to y.toFloat()),GESTURE_PRESS_MS)
+    /** Debug-only comparison of input lanes on a live launch screen; never used by automatic detection. */
+    @Volatile private var probeResult="none"
+    private fun probeTap(spec: String) {
+        val parts=spec.split(',');val mode=parts[0];val x=parts.getOrNull(1)?.toIntOrNull() ?: return;val y=parts.getOrNull(2)?.toIntOrNull() ?: return
+        probeResult="$mode running"
+        scope.launch {
+            val started=SystemClock.elapsedRealtime()
+            val outcome=when(mode) {
+                "gesture" -> dispatchTouch(x,y).toString()
+                "gesture-long" -> dispatchStroke(listOf(x-1f to y-1f,x+1f to y+1f),220).toString()
+                "gesture-jitter" -> dispatchStroke(listOf(x-2f to y+1f,x+0f to y-1f,x+2f to y+0f,x+1f to y+2f),140).toString()
+                "native", "nodes" -> withContext(Dispatchers.IO) {
+                    val root=rootInActiveWindow ?: return@withContext "no-root"
+                    val hits=mutableListOf<AccessibilityNodeInfo>();val bounds=android.graphics.Rect();var total=0
+                    fun walk(n: AccessibilityNodeInfo,depth: Int) {
+                        total++
+                        n.getBoundsInScreen(bounds)
+                        if(bounds.contains(x,y)) hits+=n
+                        if(depth<40) for(i in 0 until n.childCount) n.getChild(i)?.let {walk(it,depth+1)}
+                    }
+                    walk(root,0)
+                    val describe=hits.joinToString(" / ") {n -> n.getBoundsInScreen(bounds)
+                        "${n.className?.toString()?.substringAfterLast('.')}[click=${n.isClickable},vis=${n.isVisibleToUser},${bounds.width()}x${bounds.height()},text=${n.text?.length ?: 0},desc=${n.contentDescription?.length ?: 0}]"}
+                    if(mode=="nodes") "pkg=${root.packageName} total=$total hits=${hits.size}: $describe"
+                    else hits.lastOrNull {it.isClickable}?.performAction(AccessibilityNodeInfo.ACTION_CLICK)?.toString() ?: "no-clickable: $describe"
+                }
+                else -> "unknown mode"
+            }
+            probeResult="$mode $x,$y -> $outcome (${SystemClock.elapsedRealtime()-started} ms)"
+            repository.log("","诊断点击：$probeResult")
+        }
+    }
+    private suspend fun dispatchStroke(points: List<Pair<Float,Float>>,durationMs: Long): Boolean = withContext(NonCancellable) {
+        val path=Path().apply {moveTo(points[0].first,points[0].second);points.drop(1).forEach {lineTo(it.first,it.second)}}
+        val gesture=GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path,0,durationMs))
             .apply {if(android.os.Build.VERSION.SDK_INT>=30) setDisplayId(android.view.Display.DEFAULT_DISPLAY)}.build()
         withTimeoutOrNull(1500) {suspendCancellableCoroutine { c ->
             val accepted = dispatchGesture(gesture,object : GestureResultCallback() {
@@ -698,6 +893,12 @@ class SkipAccessibilityService : AccessibilityService() {
                     writer.println("Temporarily holding automatic actions for $pkg; configuration is unchanged")
                 }
             }
+            args.firstOrNull {it.startsWith("probe-tap=")}?.let {probeTap(it.substringAfter('='));writer.println("Probe tap requested")}
+            if("probe-result" in args) writer.println("probe=$probeResult")
+            if("clear-ad-jumps" in args) {repository.adJumps.clear();writer.println("Cleared launch-ad jump records")}
+            args.firstOrNull {it.startsWith("enhanced-touch=")}?.substringAfter('=')?.let {value ->
+                repository.updateSettings {it.copy(enhancedTouch=value=="on")};writer.println("Enhanced touch preference set to $value")
+            }
             if("release-actions" in args) {diagnosticHeldPackage=null;getSharedPreferences("touch_diagnostic_controls",MODE_PRIVATE).edit().remove("heldPackage").apply();writer.println("Automatic actions resumed")}
             if("start-owned-touch" in args && repository.settings.value.enhancedTouch &&
                 (application as TiaoApplication).wirelessBootstrap.state.value.paired) {
@@ -747,6 +948,7 @@ class SkipAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         (application as TiaoApplication).wirelessBootstrap.cancelAssistance("无障碍服务断开")
         pairingAssistant?.close();pairingAssistant=null
+        if(screenReceiver) {runCatching {unregisterReceiver(screenOff)};screenReceiver=false}
         clearNodes()
         autoLearning?.close()
         hideOverlay(); scope.cancel(); repository.connected.value = false

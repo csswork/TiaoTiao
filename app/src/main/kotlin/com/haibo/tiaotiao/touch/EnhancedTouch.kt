@@ -20,7 +20,7 @@ data class TouchHealth(val checkedAt: Long=0,val available: Boolean=false,val ui
 data class TouchAttempt(val requestId: String="",val reason: String="",val code: Int=0,val elapsedMs: Long=0,val at: Long=0)
 
 /** Single-app Binder client; the only bootstrap is TiaoTiao's locally paired shell starter. */
-class EnhancedTouch(context: Context) {
+class EnhancedTouch(private val context: Context) {
     private val journal=(context.applicationContext as TiaoApplication).touchJournal
     private val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main.immediate)
     private val probeLock=Mutex()
@@ -48,7 +48,27 @@ class EnhancedTouch(context: Context) {
                 journal.record("SERVICE","binder_died")
             }
         }},0)
-        handler.post {refresh();journal.record("SERVICE","attached");scope.launch {probe("attached")}}
+        handler.post {refresh();journal.record("SERVICE","attached");scope.launch {probe("attached");restoreStaleSensorPauses()}}
+    }
+    private val sensorPauses=context.getSharedPreferences("sensor_pauses",Context.MODE_PRIVATE)
+    /** Pause one app's motion sensors for its launch window. Recorded first, so a service that dies before its own
+     * restore timer fires is corrected on the next attach rather than leaving the app sensor-idle until reboot. */
+    suspend fun pauseSensors(pkg: String,durationMs: Long): Boolean {
+        val target=service?.takeIf {it.asBinder().pingBinder()} ?: return false
+        sensorPauses.edit().putLong(pkg,System.currentTimeMillis()+durationMs).apply()
+        return withContext(NonCancellable+Dispatchers.IO) {
+            val code=runCatching {target.pauseSensors(pkg,durationMs).getInt("code")}.getOrDefault(0)
+            journal.record("SENSOR",if(code==1) "sensors_paused" else "sensor_pause_failed",pkg,details=mapOf("durationMs" to durationMs.toString()))
+            code==1
+        }
+    }
+    private suspend fun restoreStaleSensorPauses() {
+        val target=service ?: return
+        val stale=sensorPauses.all.keys.toList()
+        if(stale.isEmpty()) return
+        withContext(Dispatchers.IO) {stale.forEach {pkg ->
+            if(runCatching {target.resumeSensors(pkg).getInt("code")}.getOrDefault(0)==1) sensorPauses.edit().remove(pkg).apply()
+        }}
     }
     fun refresh() {_state.value=if(ownedReady) TouchConnection.READY else TouchConnection.STOPPED}
     suspend fun probe(trigger: String="manual")=probeLock.withLock {

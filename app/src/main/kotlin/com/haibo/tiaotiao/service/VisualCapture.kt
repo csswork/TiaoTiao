@@ -47,7 +47,7 @@ class VisualFrame(val screen: ScreenSnapshot, val bitmap: Bitmap, val signals: V
 }
 
 @android.annotation.SuppressLint("NewApi")
-class VisualCapture(private val service: AccessibilityService) {
+class VisualCapture(private val service: AccessibilityService,private val overlay: () -> Rect? = {null}) {
     private var lastDisplayCapture=0L
     internal var lastTargetCheck="尚未检查"
         private set
@@ -81,7 +81,12 @@ class VisualCapture(private val service: AccessibilityService) {
             val targetDistance=frame.patch(target).zip(latest.patch(target)).count {p ->p.first!=p.second}
             val contextDistance=frame.patch(Area(.05f,.12f,.95f,.88f)).zip(latest.patch(Area(.05f,.12f,.95f,.88f))).count {p ->p.first!=p.second}
             lastTargetCheck="目标差异=$targetDistance/64，画面差异=$contextDistance/64"
-            targetDistance<=6 && contextDistance<=12
+            if(targetDistance<=6 && contextDistance<=12) return@withContext true
+            // Photo/video backgrounds and countdown digits move pixels behind an unchanged control.
+            // The same literal skip/close text still read at the same centre identifies it; icons keep the pixel rule.
+            val text=try {refineControl(latest,area)} catch(c: CancellationException) {throw c} catch(_: Exception) {null}
+            lastTargetCheck+="，文字复核=${if(text!=null) "仍在原位" else "未找到"}"
+            text!=null
         }
     }
     suspend fun capture(screen: ScreenSnapshot,display: Boolean=false): VisualFrame {
@@ -183,6 +188,11 @@ class VisualCapture(private val service: AccessibilityService) {
             lines.filterNot { SignalText.isPublicControlText(it.text) || it.text.trim() in navigation || possibleControl(it) ||
                 it.text.trim().matches(Regex("\\d{1,2}\\s*(?:秒|s|S)")) }.forEach {
                 it.boundingBox?.let { r -> canvas.drawRect(r,paint) }
+            }
+            // TiaoTiao's own status bubble is not part of the app's screen; keep it away from the model.
+            overlay()?.let {r ->
+                val scale=imageBitmap.width.toFloat()/bitmap.width
+                canvas.drawRect(r.left*scale,r.top*scale,r.right*scale,r.bottom*scale,paint)
             }
             val jpeg = ByteArrayOutputStream().use { masked.compress(Bitmap.CompressFormat.JPEG,75,it); it.toByteArray() }
             masked.recycle()

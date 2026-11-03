@@ -69,5 +69,44 @@ class SystemTouchService @JvmOverloads constructor(initialOwnerUid: Int?=null,pr
         } catch(error: Exception) {return reply(0,"service_exception_${error.javaClass.simpleName}")}
         finally {Binder.restoreCallingIdentity(identity)}
     }
-    @Synchronized override fun destroy() {check(authenticate());kotlin.system.exitProcess(0)}
+    private val sensorTimer=java.util.concurrent.Executors.newSingleThreadScheduledExecutor {Thread(it,"sensor-restore").apply {isDaemon=true}}
+    private val sensorRestores=mutableMapOf<String,java.util.concurrent.ScheduledFuture<*>>()
+    private fun sensorState(packageName: String,state: String): Boolean {
+        val process=ProcessBuilder("/system/bin/cmd","sensorservice",if(state=="reset") "reset-uid-state" else "set-uid-state",
+            *(if(state=="reset") arrayOf(packageName) else arrayOf(packageName,state))).redirectErrorStream(true).start()
+        if(!process.waitFor(1500,TimeUnit.MILLISECONDS)) {process.destroyForcibly();return false}
+        return process.exitValue()==0
+    }
+    /** Shake/flip launch ads read motion sensors to open their landing page; idle UIDs receive no sensor events.
+     * Only a package name and a bounded duration are accepted, and the restore is scheduled here, not by the caller. */
+    @Synchronized override fun pauseSensors(packageName: String,durationMs: Long): Bundle {
+        fun reply(code: Int,reason: String)=Bundle().apply {putInt("code",code);putString("reason",reason)}
+        if(!authenticate()) return reply(-1,"unauthorized_caller")
+        if(!packageName.matches(Regex("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+")) || durationMs !in 1000..15_000) return reply(-1,"invalid_request")
+        val identity=Binder.clearCallingIdentity()
+        try {
+            if(!sensorState(packageName,"idle")) return reply(0,"sensor_command_failed")
+            sensorRestores.remove(packageName)?.cancel(false)
+            sensorRestores[packageName]=sensorTimer.schedule({
+                synchronized(this) {sensorRestores.remove(packageName)}
+                runCatching {sensorState(packageName,"reset")}
+            },durationMs,TimeUnit.MILLISECONDS)
+            return reply(1,"sensors_paused")
+        } catch(error: Exception) {return reply(0,"service_exception_${error.javaClass.simpleName}")}
+        finally {Binder.restoreCallingIdentity(identity)}
+    }
+    @Synchronized override fun resumeSensors(packageName: String): Bundle {
+        val result=Bundle()
+        if(!authenticate() || !packageName.matches(Regex("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+"))) return result.apply {putInt("code",-1)}
+        sensorRestores.remove(packageName)?.cancel(false)
+        val identity=Binder.clearCallingIdentity()
+        return try {result.apply {putInt("code",if(sensorState(packageName,"reset")) 1 else 0)}}
+            catch(_: Exception) {result.apply {putInt("code",0)}} finally {Binder.restoreCallingIdentity(identity)}
+    }
+    @Synchronized override fun destroy() {
+        check(authenticate())
+        // Never leave an app sensor-idle behind when the service is stopped.
+        sensorRestores.keys.toList().forEach {runCatching {sensorState(it,"reset")}}
+        kotlin.system.exitProcess(0)
+    }
 }

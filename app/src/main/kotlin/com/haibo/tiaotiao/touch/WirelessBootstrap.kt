@@ -46,6 +46,7 @@ class WirelessBootstrap(private val context: Context) {
     private var assistanceTimeout: Job?=null
     private var lastAutoPort=0
     private var startupStage="连接本机"
+    private var restart: Job?=null
     private val pairDiscovery=AdbMdns(context,AdbMdns.SERVICE_TYPE_TLS_PAIRING) {_,port ->
         _state.update {it.copy(pairingPort=port.coerceAtLeast(0),phase=if(port>0 && it.phase in setOf(WirelessPhase.DISCOVERING,WirelessPhase.WAITING_CODE)) WirelessPhase.WAITING_CODE else it.phase)}
     }
@@ -53,14 +54,46 @@ class WirelessBootstrap(private val context: Context) {
         if(port>0) prefs.edit().putInt("connectPort",port).apply()
         _state.update {it.copy(connectPort=port.coerceAtLeast(0))}
     }
-    init {scope.launch {app.enhancedTouch.state.collect {
+    init {
+        scope.launch {app.enhancedTouch.state.collect {
         if(app.enhancedTouch.ownedReady) {
             _state.update {s ->s.copy(phase=WirelessPhase.READY,message="内置增强点击已就绪",assisting=false)}
             assistanceTimeout?.cancel()
             stopDiscovery()
         }
-        else if(_state.value.phase==WirelessPhase.READY) _state.update {s ->s.copy(phase=WirelessPhase.IDLE,message="内置服务已停止，开启无线调试后可重新启动")}
-    }}}
+        else if(_state.value.phase==WirelessPhase.READY) {
+            _state.update {s ->s.copy(phase=WirelessPhase.IDLE,message="内置服务已停止，开启无线调试后可重新启动")}
+            scheduleRestart("服务停止")
+        }
+        }}
+        // A VPN or Wi-Fi change restarts adbd and kills the shell-launched touch process. Relaunch it with the saved
+        // pairing whenever wireless debugging is on again, instead of silently degrading to ACTION_CLICK.
+        scope.launch {app.touchJournal.network.collect {if(it.wirelessAdb==1 && !app.enhancedTouch.ownedReady) scheduleRestart("网络变化")}}
+        // Turning the preference back on should not require pressing "启动" again when a pairing is saved.
+        scope.launch {app.repository.settings.map {it.enhancedTouch}.distinctUntilChanged().collect {
+            if(it && !app.enhancedTouch.ownedReady) scheduleRestart("已开启增强点击")
+        }}
+    }
+    private fun canRestart()=Build.VERSION.SDK_INT>=30 && _state.value.paired && !_state.value.assisting &&
+        app.repository.settings.value.enhancedTouch && app.enhancedTouch.health.value.reason!="stopped_by_user" &&
+        runCatching {Settings.Global.getInt(context.contentResolver,"adb_wifi_enabled",0)==1}.getOrDefault(false)
+    private fun scheduleRestart(trigger: String) {
+        if(restart?.isActive==true || !canRestart()) return
+        restart=scope.launch {
+            for(wait in listOf(2_000L,10_000L,30_000L)) {
+                delay(wait)
+                if(app.enhancedTouch.ownedReady || !canRestart()) return@launch
+                app.repository.log("","增强点击已断开（$trigger），正在用已保存的配对自动重新启动")
+                // The connect port changes whenever adbd restarts; rediscover it rather than trusting the saved one.
+                _state.update {it.copy(connectPort=0)}
+                if(!connectDiscovery.isRunning) runCatching {connectDiscovery.start()}
+                startPaired(quiet=true)
+                operation?.join()
+                if(app.enhancedTouch.ownedReady) return@launch
+            }
+            stopDiscovery()
+        }
+    }
     fun beginAssistedPairing(): Boolean {
         if(!app.repository.connected.value) {
             _state.update {it.copy(phase=WirelessPhase.FAILED,message="请先开启 TiaoTiao 无障碍服务，再开始配对")}
@@ -132,7 +165,7 @@ class WirelessBootstrap(private val context: Context) {
             finally {withContext(NonCancellable+Dispatchers.IO) {runCatching {client?.disconnect()}}}
         }}
     }
-    fun startPaired(manualConnectPort: Int?=null) {
+    fun startPaired(manualConnectPort: Int?=null,quiet: Boolean=false) {
         if(manualConnectPort!=null && manualConnectPort in 1..65535) {
             _state.update {it.copy(connectPort=manualConnectPort)};prefs.edit().putInt("connectPort",manualConnectPort).apply()
         }
@@ -141,7 +174,7 @@ class WirelessBootstrap(private val context: Context) {
             _state.update {it.copy(phase=WirelessPhase.STARTING,message="正在连接本机并启动增强点击…")}
             var client: AbsAdbConnectionManager?=null
             try {val connection=withContext(Dispatchers.IO) {client()};client=connection;launchServer(connection)
-                Toast.makeText(context,"内置增强点击已就绪",Toast.LENGTH_SHORT).show()}
+                if(quiet) app.repository.log("","增强点击已自动恢复") else Toast.makeText(context,"内置增强点击已就绪",Toast.LENGTH_SHORT).show()}
             catch(c: CancellationException) {throw c}
             catch(error: Exception) {
                 app.repository.log("","内置启动未完成：$startupStage / ${error.javaClass.simpleName}")

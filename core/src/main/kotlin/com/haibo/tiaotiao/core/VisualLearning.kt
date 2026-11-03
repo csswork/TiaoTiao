@@ -43,6 +43,10 @@ import java.util.UUID
 object VisualPolicy {
     const val MAX_RULES=500
     const val MAX_BYTES=4_194_304
+    /** A wrong automatic target stops after this many consecutive failures until the user acts. */
+    const val MAX_AUTOMATIC_FAILURES=3
+    /** Sessions that skip clicking to time a natural ending; afterwards clicking resumes without timing proof. */
+    const val MAX_BASELINE_OBSERVATIONS=2
     fun confirm(rule: VisualRule,now: Long): VisualRule {
         require(now>0)
         val revised=rule.copy(learningRevision=rule.learningRevision+1)
@@ -56,9 +60,13 @@ object VisualPolicy {
     fun pauseAutomatically(rule: VisualRule,message: String,now: Long): VisualRule {
         if(userPaused(rule)) return rule
         val failures=(rule.automaticFailures+1).coerceAtMost(100)
-        val backoff=when(failures) {1 -> 15_000L;2 -> 60_000L;else -> 300_000L}
+        if(failures>=MAX_AUTOMATIC_FAILURES) return rule.copy(state=VisualRuleState.PAUSED,automaticFailures=failures,retryAfter=Long.MAX_VALUE,
+            lastResult="连续 $failures 次自动检查未通过，已停止自动重试；请调整位置或重新学习")
+        val backoff=if(failures==1) 15_000L else 60_000L
         return rule.copy(state=VisualRuleState.PAUSED,automaticFailures=failures,retryAfter=now+backoff,lastResult=message)
     }
+    fun observeNaturalEnding(rule: VisualRule,countdown: Int?,baseline: Long,observations: Int) =
+        !rule.active() && countdown==null && baseline==0L && observations<MAX_BASELINE_OBSERVATIONS && rule.evidence.any {it.timingBasis=="unknown"}
     /** Fresh AI recognition is required to recover an automatically paused target. */
     fun replaceProposal(old: VisualRule?,incoming: VisualRule,now: Long): VisualRule? {
         if(old==null) return incoming
@@ -141,8 +149,10 @@ object VisualPolicy {
         val node=rule.nodeTarget?.let { rule.nodeScene==AdRecognition.nodeScene(screen) && AdRecognition.matchesNode(it,screen) }==true
         val context=binaryHash(rule.contextHash) && binaryHash(contextHash) &&
             rule.contextHash.count {it=='1'} in 4..60 && contextHash.count {it=='1'} in 4..60 && distance(rule.contextHash,contextHash)<=4
-        // A Jev-confirmed structural scene can supply ad context for an unlabeled dismiss icon.
-        if (!signals.advertisement && !node && !context && !(rule.sceneVersion==1 && signals.skips.isNotEmpty() && signals.countdown != null)) return false
+        // A Jev-confirmed structural scene can supply ad context for an unlabeled dismiss icon. A literal
+        // skip at the learned target is its own launch-screen evidence; most splashes show no "广告" badge.
+        val explicit = controlTarget(rule.target,signals.explicitSkips)!=null
+        if (!signals.advertisement && !node && !context && !explicit && !(rule.sceneVersion==1 && signals.skips.isNotEmpty() && signals.countdown != null)) return false
         val labelled = controlTarget(rule.target,signals.skips)!=null
         val patch = patchHash.length == 64 && patchHash.zip(rule.targetHash).count { it.first != it.second } <= 5
         val informative = rule.targetHash.count { it=='1' } in 4..60 && patchHash.count { it=='1' } in 4..60
@@ -152,7 +162,8 @@ object VisualPolicy {
         if (!home || !sameApp) return pauseAutomatically(rule,"自动检查未通过，稍后自动重新识别",now)
         require(timingBasis in setOf("countdown","observed_baseline","unknown"))
         val proof = AutoEvidence(session, rule.behavior(), now, early, home, sameApp,timingBasis)
-        val next = rule.copy(evidence = (rule.evidence.filterNot { it.session == session } + proof).takeLast(20))
+        val next = rule.copy(evidence = (rule.evidence.filterNot { it.session == session } + proof).takeLast(20),
+            automaticFailures = if (early) 0 else rule.automaticFailures)
         return next.copy(state = if (next.successfulSessions() >= 2 || next.manuallyConfirmed()) VisualRuleState.ACTIVE else VisualRuleState.CANDIDATE,
             lastResult = if(next.manuallyConfirmed()) "用户确认仍有效，本次结果检查完成" else if (early) "自动检查通过（${next.successfulSessions()}/2）" else "页面已变化，时序证据不足，保留候选")
     }

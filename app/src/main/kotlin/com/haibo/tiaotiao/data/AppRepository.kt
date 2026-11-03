@@ -44,6 +44,8 @@ class AppRepository(private val context: Context) {
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private val baselinePrefs = context.getSharedPreferences("visual_baselines", Context.MODE_PRIVATE)
     fun visualBaseline(scene: String): Long = baselinePrefs.getLong(scene,0)
+    fun baselineObservations(scene: String) = baselinePrefs.getInt("observed-$scene",0)
+    fun recordBaselineObservation(scene: String) {baselinePrefs.edit().putInt("observed-$scene",baselineObservations(scene)+1).apply()}
     fun recordVisualBaseline(scene: String, duration: Long) {
         if (duration !in 1000..15_000) return
         val old=visualBaseline(scene)
@@ -187,6 +189,7 @@ class AppRepository(private val context: Context) {
         }
     }
     val connected = MutableStateFlow(false)
+    val adJumps = AdJumps(context)
     val sampleCount = MutableStateFlow(samplesDir.listFiles()?.size ?: 0)
 
     @Synchronized fun updateSettings(transform: (AppSettings) -> AppSettings) {
@@ -293,7 +296,8 @@ class AppRepository(private val context: Context) {
         log(pkg, message)
     }
     @Synchronized fun log(pkg: String, message: String) {
-        val entries = (listOf(LogEntry(System.currentTimeMillis(), pkg, message)) + _logs.value).take(150)
+        // One launch writes 10–30 entries; keep enough to diagnose a whole test round after the fact.
+        val entries = (listOf(LogEntry(System.currentTimeMillis(), pkg, message)) + _logs.value).take(1000)
         _logs.value = entries
         logWrites.trySend(entries)
     }
@@ -307,7 +311,7 @@ class AppRepository(private val context: Context) {
         baselinePrefs.edit().clear().apply()
         listOf("rules.recovery.json","visual_rules.recovery.json").forEach {File(context.filesDir,it).delete()}
         File(context.filesDir,"last_execution").deleteRecursively()
-        previews.clear()
+        previews.clear();adJumps.clear()
         detection.value=null;clearLogs()
     }
     @Synchronized fun put(rule: SkipRule) {

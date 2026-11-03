@@ -16,14 +16,36 @@ class VisualRecoveryTest {
         assertEquals(VisualRuleState.CANDIDATE,recovered.state);assertTrue(recovered.evidence.isEmpty())
         assertFalse(recovered.active())
     }
-    @Test fun `repeated failures back off without permanently disabling relearning`() {
+    @Test fun `repeated failures back off then stop relearning until the user acts`() {
         var current=rule
-        for(delay in listOf(15_000L,60_000L,300_000L,300_000L)) {
+        for(delay in listOf(15_000L,60_000L)) {
             val failed=VisualPolicy.pauseAutomatically(current,"自动检查未通过",1000)
             assertEquals(1000+delay,failed.retryAfter)
             current=requireNotNull(VisualPolicy.replaceProposal(failed,rule,failed.retryAfter))
         }
-        assertEquals(4,current.automaticFailures)
+        val stopped=VisualPolicy.pauseAutomatically(current,"自动检查未通过",1000)
+        assertEquals(VisualPolicy.MAX_AUTOMATIC_FAILURES,stopped.automaticFailures)
+        assertEquals(Long.MAX_VALUE,stopped.retryAfter)
+        assertFalse(VisualPolicy.canRelearn(stopped,Long.MAX_VALUE-1))
+        assertNull(VisualPolicy.replaceProposal(stopped,rule,Long.MAX_VALUE-1))
+        assertFalse(VisualPolicy.userPaused(stopped))
+        VisualPolicy.validate(stopped)
+        // The detail page's relearn/adjust reset these fields and resume learning.
+        assertTrue(VisualPolicy.canRelearn(stopped.copy(state=VisualRuleState.CANDIDATE,retryAfter=0,automaticFailures=0),1000))
+    }
+    @Test fun `an early success resets the consecutive failure count`() {
+        val recovered=rule.copy(automaticFailures=2)
+        assertEquals(0,VisualPolicy.record(recovered,"ok",true,true,true,1).automaticFailures)
+        assertEquals(2,VisualPolicy.record(recovered,"late",false,true,true,1).automaticFailures)
+    }
+    @Test fun `natural ending is observed a bounded number of sessions`() {
+        val unknown=rule.copy(evidence=listOf(AutoEvidence("first",rule.behavior(),1,false,true,true,"unknown")))
+        assertTrue(VisualPolicy.observeNaturalEnding(unknown,null,0,0))
+        assertTrue(VisualPolicy.observeNaturalEnding(unknown,null,0,VisualPolicy.MAX_BASELINE_OBSERVATIONS-1))
+        assertFalse(VisualPolicy.observeNaturalEnding(unknown,null,0,VisualPolicy.MAX_BASELINE_OBSERVATIONS))
+        assertFalse(VisualPolicy.observeNaturalEnding(unknown,5,0,0))
+        assertFalse(VisualPolicy.observeNaturalEnding(unknown,null,3000,0))
+        assertFalse(VisualPolicy.observeNaturalEnding(rule,null,0,0))
     }
     @Test fun `user pause and verified rules are never overwritten by a model`() {
         val disabled=rule.copy(state=VisualRuleState.PAUSED,lastResult="用户反馈点错，已停用")

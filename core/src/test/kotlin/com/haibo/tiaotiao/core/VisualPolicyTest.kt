@@ -58,6 +58,9 @@ class VisualPolicyTest {
     @Test fun `a candidate can be attempted without asking a person but needs fresh ad evidence`() {
         assertTrue(VisualPolicy.canAttempt(rule, screen, ad, rule.targetHash))
         assertFalse(VisualPolicy.canAttempt(rule, screen, ad.copy(advertisement = false, countdown = null), rule.targetHash))
+        // A literal skip at the learned target is launch-screen evidence even without a readable ad badge.
+        assertTrue(VisualPolicy.canAttempt(rule, screen, ad.copy(advertisement = false, countdown = null, explicitSkips = listOf(area)), rule.targetHash))
+        assertFalse(VisualPolicy.canAttempt(rule, screen, ad.copy(advertisement = false, countdown = null, explicitSkips = listOf(Area(.1f,.9f,.2f,.95f))), rule.targetHash))
         assertFalse(VisualPolicy.canAttempt(rule, screen, ad.copy(home = true), rule.targetHash))
         assertFalse(VisualPolicy.canAttempt(rule, screen.copy(versionCode = 2), ad, rule.targetHash))
         assertFalse(VisualPolicy.canAttempt(rule, screen.copy(complete = false), ad, rule.targetHash))

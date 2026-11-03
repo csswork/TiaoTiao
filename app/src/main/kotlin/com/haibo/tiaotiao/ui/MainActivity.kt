@@ -78,6 +78,7 @@ class MainActivity : ComponentActivity() {
         val hasVisionKey=repository.visionKeyAvailable()
         val currentConnection=visionConnection
         val detection by repository.detection.collectAsStateWithLifecycle()
+        val adJumps by repository.adJumps.items.collectAsStateWithLifecycle()
         val scope = rememberCoroutineScope()
         val snackbar = remember { SnackbarHostState() }
         var tab by rememberSaveable { mutableIntStateOf(if(intent.getBooleanExtra("configure_vision",false) || intent.getBooleanExtra("configure_touch",false)) 4 else 0) }
@@ -246,6 +247,9 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
+                        adJumps.filter {it.unread}.forEach {jump -> item(key="ad_jump_${jump.packageName}") {
+                            AdJumpCard(jump) {intent.putExtra("configure_touch",true);tab=4}
+                        } }
                         item {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 Stat("已验证", entries.count { it.verified }.toString(), Modifier.weight(1f)) { ruleFilter=RuleFilter.VERIFIED;tab=2 }
@@ -353,7 +357,7 @@ class MainActivity : ComponentActivity() {
         var authorization by remember { mutableStateOf("") }
         var authSaved by remember { mutableStateOf(repository.vault.get("syncAuthorization").isNotBlank()) }
         LaunchedEffect(Unit) {
-            if(intent.getBooleanExtra("configure_touch",false)) listState.scrollToItem(3)
+            if(intent.getBooleanExtra("configure_touch",false)) {listState.scrollToItem(3);intent.removeExtra("configure_touch")}
         }
         LaunchedEffect(focusJevKey) {
             if (focusJevKey) {

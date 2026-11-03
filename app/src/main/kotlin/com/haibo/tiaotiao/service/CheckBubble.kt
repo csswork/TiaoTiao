@@ -35,9 +35,18 @@ internal class CheckBubble(private val service: AccessibilityService,private val
             if(runCatching {manager.addView(label,params)}.isFailure) return
             view=label
             shows++
+            label.post {
+                if(view!==label) return@post
+                val at=IntArray(2).also(label::getLocationOnScreen)
+                // Padded for the rounded edge; screenshots may land between frames of the window animation.
+                bounds=android.graphics.Rect(at[0]-dp(4),at[1]-dp(4),at[0]+label.width+dp(4),at[1]+label.height+dp(4))
+            }
         }
         view?.text=text
         expiry=scope.launch {delay(timeout);hide()}
     }
-    fun hide() {expiry?.cancel();expiry=null;view?.let {runCatching {manager.removeView(it)}};view=null}
+    /** Screen pixels covered by the bubble, measured on the main thread after layout; null when not shown. */
+    @Volatile var bounds: android.graphics.Rect?=null
+        private set
+    fun hide() {bounds=null;expiry?.cancel();expiry=null;view?.let {runCatching {manager.removeView(it)}};view=null}
 }
