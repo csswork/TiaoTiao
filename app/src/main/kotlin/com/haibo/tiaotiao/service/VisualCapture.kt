@@ -48,6 +48,9 @@ class VisualFrame(val screen: ScreenSnapshot, val bitmap: Bitmap, val signals: V
 
 @android.annotation.SuppressLint("NewApi")
 class VisualCapture(private val service: AccessibilityService) {
+    private var lastDisplayCapture=0L
+    internal var lastTargetCheck="尚未检查"
+        private set
     private val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
     private val navigation = setOf("首页","我的","分类","搜索","推荐","关注","消息","发现","动态","个人中心","设置","购物车","订单")
     private val warmScope=CoroutineScope(SupervisorJob()+Dispatchers.Default)
@@ -64,19 +67,66 @@ class VisualCapture(private val service: AccessibilityService) {
             finally {bitmap.recycle()}
         }
     }
-    suspend fun capture(screen: ScreenSnapshot): VisualFrame {
+    /** A fast display-only recheck after OCR/model work and before handing off any touch. */
+    suspend fun targetUnchanged(frame: VisualFrame,area: Area): Boolean = withContext(Dispatchers.Default) {
+        lastTargetCheck="正在核对当前显示画面"
+        delay((350-(SystemClock.elapsedRealtime()-lastDisplayCapture)).coerceAtLeast(0))
+        val bitmap=withTimeoutOrNull(700) {screenshot(frame.screen.windowId,display=true)}
+            ?: run {lastTargetCheck="当前截图超时";return@withContext false}
+        val latest=VisualFrame(frame.screen,bitmap,frame.signals,byteArrayOf(),SystemClock.elapsedRealtime())
+        latest.use {
+            if(bitmap.width!=frame.bitmap.width || bitmap.height!=frame.bitmap.height) {lastTargetCheck="显示尺寸已改变";return@withContext false}
+            val target=Area((area.left-.006f).coerceAtLeast(0f),(area.top-.003f).coerceAtLeast(0f),
+                (area.right+.006f).coerceAtMost(1f),(area.bottom+.003f).coerceAtMost(1f))
+            val targetDistance=frame.patch(target).zip(latest.patch(target)).count {p ->p.first!=p.second}
+            val contextDistance=frame.patch(Area(.05f,.12f,.95f,.88f)).zip(latest.patch(Area(.05f,.12f,.95f,.88f))).count {p ->p.first!=p.second}
+            lastTargetCheck="目标差异=$targetDistance/64，画面差异=$contextDistance/64"
+            targetDistance<=6 && contextDistance<=12
+        }
+    }
+    suspend fun capture(screen: ScreenSnapshot,display: Boolean=false): VisualFrame {
         var owned: VisualFrame? = null
         try {
-            withContext(Dispatchers.Default) { owned=captureWorker(screen) }
+            withContext(Dispatchers.Default) { owned=captureWorker(screen,display) }
             return requireNotNull(owned)
         } catch (t: Throwable) { owned?.close();throw t }
     }
-    private suspend fun captureWorker(screen: ScreenSnapshot): VisualFrame {
+    /** Refine a model's coarse box using a magnified, current crop of that same control. */
+    suspend fun refineControl(frame: VisualFrame,expected: Area): Area? = withContext(Dispatchers.Default) {
+        val source=frame.bitmap
+        val left=((expected.left-.025f).coerceAtLeast(0f)*source.width).toInt()
+        val top=((expected.top-.025f).coerceAtLeast(0f)*source.height).toInt()
+        val right=((expected.right+.025f).coerceAtMost(1f)*source.width).toInt()
+        val bottom=((expected.bottom+.025f).coerceAtMost(1f)*source.height).toInt()
+        if(right<=left || bottom<=top) return@withContext null
+        val crop=Bitmap.createBitmap(source,left,top,right-left,bottom-top)
+        val scale=320f/crop.width
+        val image=Bitmap.createScaledBitmap(crop,320,(crop.height*scale).toInt().coerceAtLeast(1),true)
+        try {
+            val result=kotlin.coroutines.suspendCoroutine<com.google.mlkit.vision.text.Text> { c ->
+                recognizer.process(InputImage.fromBitmap(image,0)).addOnSuccessListener {c.resume(it)}.addOnFailureListener {c.resumeWithException(it)}
+            }
+            currentCoroutineContext().ensureActive()
+            result.textBlocks.flatMap {it.lines}.mapNotNull {line ->
+                if(!SignalText.isSkip(line.text) && SignalText.sanitize(line.text)!="关闭") return@mapNotNull null
+                val r=line.boundingBox ?: return@mapNotNull null
+                Area((left+r.left/scale)/source.width,(top+r.top/scale)/source.height,
+                    (left+r.right/scale)/source.width,(top+r.bottom/scale)/source.height).takeIf {VisualPolicy.controlTarget(expected,listOf(it))!=null}
+            }.distinct().singleOrNull()
+        } finally {if(image!==crop) image.recycle();crop.recycle()}
+    }
+    private suspend fun captureWorker(screen: ScreenSnapshot,display: Boolean): VisualFrame {
         check(Build.VERSION.SDK_INT >= 30) { "视觉学习需要 Android 11 及以上" }
         // A disappearing Android starting window can otherwise hold this callback for seconds.
         // Late callbacks release their bitmap; the startup loop can retry the current window.
-        val bitmap = withTimeoutOrNull(700) {screenshot(screen.windowId)}
+        suspend fun take(display: Boolean=false): Bitmap = withTimeoutOrNull(700) {screenshot(screen.windowId,display)}
             ?: throw IllegalStateException("截图请求超时")
+        // Window screenshots have a window-local origin even when their aspect ratio resembles
+        // the display. Never stretch those coordinates over system bars or offset windows.
+        val windowBitmap=take(display=true)
+        val bitmap=if(abs(windowBitmap.width.toFloat()/windowBitmap.height-screen.width.toFloat()/screen.height)>=.015f) {
+            windowBitmap.recycle();take(display=true)
+        } else windowBitmap
         val capturedAt = SystemClock.elapsedRealtime()
         var ocrBitmap: Bitmap? = null
         return try {
@@ -101,6 +151,8 @@ class VisualCapture(private val service: AccessibilityService) {
             val skipLines = lines.filter { isSkipControl(it.text) && it.boundingBox != null }
             val skips = (skipLines.map { area(requireNotNull(it.boundingBox)) } +
                 screen.nodes.filter { SignalText.hasSkip(it.label) || SignalText.canonical(it.label)=="关闭" }.map { it.bounds }).filter { it.valid() }.distinct()
+            val explicitSkips=(skipLines.filter {SignalText.isSkip(it.text)}.map {area(requireNotNull(it.boundingBox))} +
+                screen.nodes.filter {SignalText.hasSkip(it.label)}.map {it.bounds}).filter {it.valid()}.distinct()
             val ad = screen.nodes.any { SignalText.canonical(it.label).split('|').contains("广告") } ||
                 lines.any { it.text.replace(Regex("[\\s|｜·]"),"") in setOf("广告","AD","Advertisement") }
             val inlineTimer = skipLines.mapNotNull { Regex("\\d{1,2}").find(it.text)?.value?.toIntOrNull() }.maxOrNull()
@@ -134,13 +186,16 @@ class VisualCapture(private val service: AccessibilityService) {
             }
             val jpeg = ByteArrayOutputStream().use { masked.compress(Bitmap.CompressFormat.JPEG,75,it); it.toByteArray() }
             masked.recycle()
-            VisualFrame(screen,bitmap,VisualSignals(ad,inlineTimer ?: nearbyTimer ?: edgeTimer,skips,home),jpeg,capturedAt)
+            VisualFrame(screen,bitmap,VisualSignals(ad,inlineTimer ?: nearbyTimer ?: edgeTimer,skips,home,explicitSkips),jpeg,capturedAt)
         } catch (t: Throwable) { bitmap.recycle(); throw t }
         finally { ocrBitmap?.takeIf { it!==bitmap }?.recycle() }
     }
-    private suspend fun screenshot(window: Int): Bitmap = suspendCancellableCoroutine { c ->
+    private suspend fun screenshot(window: Int,display: Boolean=false): Bitmap {
+        if(display || Build.VERSION.SDK_INT<34) delay((350-(SystemClock.elapsedRealtime()-lastDisplayCapture)).coerceAtLeast(0))
+        return suspendCancellableCoroutine { c ->
         val callback = object : AccessibilityService.TakeScreenshotCallback {
             override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                if(display || Build.VERSION.SDK_INT<34) lastDisplayCapture=SystemClock.elapsedRealtime()
                 try {
                     val wrapped = requireNotNull(Bitmap.wrapHardwareBuffer(result.hardwareBuffer,result.colorSpace))
                     val copy = wrapped.copy(Bitmap.Config.ARGB_8888,false)
@@ -152,8 +207,9 @@ class VisualCapture(private val service: AccessibilityService) {
             override fun onFailure(code: Int) { if (c.isActive) c.resumeWithException(IllegalStateException("截图不可用（$code）")) }
         }
         val executor = java.util.concurrent.Executor { it.run() }
-        if (Build.VERSION.SDK_INT >= 34) service.takeScreenshotOfWindow(window,executor,callback)
+        if (Build.VERSION.SDK_INT >= 34 && !display) service.takeScreenshotOfWindow(window,executor,callback)
         else service.takeScreenshot(Display.DEFAULT_DISPLAY,executor,callback)
+        }
     }
     fun close() { warmScope.cancel();recognizer.close() }
 }

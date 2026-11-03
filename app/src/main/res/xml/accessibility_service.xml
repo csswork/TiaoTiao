@@ -8,5 +8,5 @@
     android:canTakeScreenshot="true"
     android:canPerformGestures="true"
     android:notificationTimeout="40"
-    android:isAccessibilityTool="false"
+    android:isAccessibilityTool="true"
     android:settingsActivity="com.haibo.tiaotiao.ui.MainActivity" />

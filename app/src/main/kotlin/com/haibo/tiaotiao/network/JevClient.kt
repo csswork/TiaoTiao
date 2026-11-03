@@ -65,7 +65,7 @@ fun modelErrorMessage(error: Exception): String = when (error) {
     is SSLException -> "模型安全连接失败，请检查网络与手机时间"
     is IOException -> "模型网络请求失败，请检查手机网络或代理"
     is IllegalArgumentException, is IllegalStateException -> error.message?.takeIf { text ->
-        listOf("请", "Jev", "Vercel AI Gateway", "TypeSafe 直连").any(text::startsWith)
+        listOf("请", "Jev", "DeepSeek 官方", "图片服务配置已改变", "Vercel AI Gateway", "TypeSafe 直连").any(text::startsWith)
     } ?: "模型响应格式不正确，本次未执行点击"
     else -> "模型分析失败，本次未执行点击"
 }

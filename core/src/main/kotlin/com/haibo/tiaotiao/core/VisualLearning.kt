@@ -7,6 +7,7 @@ import java.util.UUID
 @Serializable enum class TapMethod { AUTO, ACCESSIBILITY, GESTURE }
 @Serializable data class AutoEvidence(val session: String, val behavior: String, val at: Long,
     val earlyClick: Boolean, val normalHome: Boolean, val sameApplication: Boolean, val timingBasis: String = "countdown")
+@Serializable data class VisualConfirmation(val behavior: String,val at: Long)
 @Serializable data class VisualRule(
     val id: String = UUID.randomUUID().toString(), val packageName: String, val versionCode: Long,
     val scene: String, val target: Area, val targetHash: String, val label: String,
@@ -21,22 +22,61 @@ import java.util.UUID
     val nodeScene: String = "",
     val contextHash: String = "",
     val tapMethod: TapMethod = TapMethod.AUTO,
+    val retryAfter: Long = 0,
+    val userAdjusted: Boolean = false,
+    val learningRevision: Long = 0,
+    val manualConfirmation: VisualConfirmation? = null,
 ) {
     fun behavior() = digest("$packageName|$versionCode|$scene|$target|$targetHash|$label" +
         (if(sceneVersion==1 && nodeTarget==null && nodeScene.isEmpty() && contextHash.isEmpty()) "" else "|$sceneVersion|$nodeTarget|$nodeScene|$contextHash") +
-        if(tapMethod==TapMethod.AUTO) "" else "|tap:$tapMethod")
+        (if(tapMethod==TapMethod.AUTO) "" else "|tap:$tapMethod") + (if(userAdjusted) "|manual" else "") +
+        if(learningRevision==0L) "" else "|revision:$learningRevision")
     fun successfulSessions() = evidence.filter { it.behavior == behavior() && it.earlyClick && it.normalHome && it.sameApplication }.map { it.session }.distinct().size
-    fun active() = state == VisualRuleState.ACTIVE && successfulSessions() >= 2
+    fun manuallyConfirmed() = manualConfirmation?.let {it.behavior==behavior() && it.at>0}==true
+    fun active() = state == VisualRuleState.ACTIVE && (successfulSessions() >= 2 || manuallyConfirmed())
 }
 @Serializable data class VisualBundle(val format: String = "TiaoTiaoVisualRules", val schemaVersion: Int = 2,
     val rules: List<VisualRule>)
-data class VisualSignals(val advertisement: Boolean, val countdown: Int?, val skips: List<Area>, val home: Boolean)
+@Serializable data class VisualSignals(val advertisement: Boolean, val countdown: Int?, val skips: List<Area>, val home: Boolean,
+    val explicitSkips: List<Area> = emptyList())
 
 object VisualPolicy {
     const val MAX_RULES=500
     const val MAX_BYTES=4_194_304
+    fun confirm(rule: VisualRule,now: Long): VisualRule {
+        require(now>0)
+        val revised=rule.copy(learningRevision=rule.learningRevision+1)
+        return revised.copy(state=VisualRuleState.ACTIVE,manualConfirmation=VisualConfirmation(revised.behavior(),now),
+            awaitingLocalReview=false,retryAfter=0,automaticFailures=0,lastResult="用户已确认方案正确，已启用")
+    }
     private fun binaryHash(value: String) = value.matches(Regex("[01]{64}"))
     private fun distance(a: String, b: String) = a.zip(b).count { it.first != it.second }
+    fun userPaused(rule: VisualRule) = rule.state==VisualRuleState.PAUSED && rule.lastResult.startsWith("用户")
+    fun canRelearn(rule: VisualRule,now: Long) = !userPaused(rule) && (rule.state!=VisualRuleState.PAUSED || now>=rule.retryAfter)
+    fun pauseAutomatically(rule: VisualRule,message: String,now: Long): VisualRule {
+        if(userPaused(rule)) return rule
+        val failures=(rule.automaticFailures+1).coerceAtMost(100)
+        val backoff=when(failures) {1 -> 15_000L;2 -> 60_000L;else -> 300_000L}
+        return rule.copy(state=VisualRuleState.PAUSED,automaticFailures=failures,retryAfter=now+backoff,lastResult=message)
+    }
+    /** Fresh AI recognition is required to recover an automatically paused target. */
+    fun replaceProposal(old: VisualRule?,incoming: VisualRule,now: Long): VisualRule? {
+        if(old==null) return incoming
+        if(old.active() || !canRelearn(old,now)) return null
+        if(old.state!=VisualRuleState.PAUSED && !old.awaitingLocalReview) return null
+        return incoming.copy(id=old.id,automaticFailures=old.automaticFailures,retryAfter=0,learningRevision=old.learningRevision)
+    }
+    /** OCR text may be much tighter than a model's button box; compare centres, not equal edges. */
+    fun controlTarget(expected: Area, controls: List<Area>): Area? {
+        val x=(expected.left+expected.right)/2;val y=(expected.top+expected.bottom)/2
+        val matching=controls.filter { area -> area.valid() && area.right-area.left<=.4f && area.bottom-area.top<=.18f &&
+            area.left<expected.right && area.right>expected.left && area.top<expected.bottom && area.bottom>expected.top &&
+            kotlin.math.abs((area.left+area.right)/2-x)<=.025f && kotlin.math.abs((area.top+area.bottom)/2-y)<=.025f }
+        val precise=matching.minByOrNull {(it.right-it.left)*(it.bottom-it.top)} ?: return null
+        val px=(precise.left+precise.right)/2;val py=(precise.top+precise.bottom)/2
+        // Nested OCR/node boxes describe one control. Separate neighbouring controls are ambiguous.
+        return precise.takeIf {matching.all {px in it.left..it.right && py in it.top..it.bottom}}
+    }
     /** Only an informative, stable home patch distinct from the ad can become a template.
      * The caller may persist it only after an independent AI verdict accepts the home frames. */
     fun homeTemplate(before: String, first: String, second: String): String {
@@ -80,6 +120,9 @@ object VisualPolicy {
         require(rule.targetHash.matches(Regex("[01]{64}")) && rule.label in setOf("skip", "close_ad"))
         require(rule.source.length <= 120 && rule.evidence.size <= 20)
         require(rule.automaticFailures in 0..100)
+        require(rule.retryAfter>=0)
+        require(rule.learningRevision>=0)
+        rule.manualConfirmation?.let {require(it.behavior.matches(Regex("[a-f0-9]{64}")) && it.at>0)}
         require(rule.sceneVersion in 1..2)
         require(rule.nodeScene.isEmpty() || rule.nodeScene.matches(Regex("[a-f0-9]{64}")))
         require(rule.contextHash.isEmpty() || binaryHash(rule.contextHash))
@@ -100,18 +143,18 @@ object VisualPolicy {
             rule.contextHash.count {it=='1'} in 4..60 && contextHash.count {it=='1'} in 4..60 && distance(rule.contextHash,contextHash)<=4
         // A Jev-confirmed structural scene can supply ad context for an unlabeled dismiss icon.
         if (!signals.advertisement && !node && !context && !(rule.sceneVersion==1 && signals.skips.isNotEmpty() && signals.countdown != null)) return false
-        val labelled = signals.skips.any { it.near(rule.target) }
+        val labelled = controlTarget(rule.target,signals.skips)!=null
         val patch = patchHash.length == 64 && patchHash.zip(rule.targetHash).count { it.first != it.second } <= 5
         val informative = rule.targetHash.count { it=='1' } in 4..60 && patchHash.count { it=='1' } in 4..60
-        return labelled || node || ((signals.advertisement || context) && patch && informative)
+        return labelled || node || (rule.userAdjusted && context && signals.advertisement) || ((signals.advertisement || context) && patch && informative)
     }
     fun record(rule: VisualRule, session: String, early: Boolean, home: Boolean, sameApp: Boolean, now: Long, timingBasis: String = "countdown"): VisualRule {
-        if (!home || !sameApp) return rule.copy(state = VisualRuleState.PAUSED, automaticFailures=(rule.automaticFailures+1).coerceAtMost(100), lastResult = "自动检查未通过，等待重新识别")
+        if (!home || !sameApp) return pauseAutomatically(rule,"自动检查未通过，稍后自动重新识别",now)
         require(timingBasis in setOf("countdown","observed_baseline","unknown"))
         val proof = AutoEvidence(session, rule.behavior(), now, early, home, sameApp,timingBasis)
         val next = rule.copy(evidence = (rule.evidence.filterNot { it.session == session } + proof).takeLast(20))
-        return next.copy(state = if (next.successfulSessions() >= 2) VisualRuleState.ACTIVE else VisualRuleState.CANDIDATE,
-            lastResult = if (early) "自动检查通过（${next.successfulSessions()}/2）" else "页面已变化，时序证据不足，保留候选")
+        return next.copy(state = if (next.successfulSessions() >= 2 || next.manuallyConfirmed()) VisualRuleState.ACTIVE else VisualRuleState.CANDIDATE,
+            lastResult = if(next.manuallyConfirmed()) "用户确认仍有效，本次结果检查完成" else if (early) "自动检查通过（${next.successfulSessions()}/2）" else "页面已变化，时序证据不足，保留候选")
     }
     fun decode(text: String): VisualBundle {
         require(text.toByteArray().size <= MAX_BYTES)
@@ -122,6 +165,6 @@ object VisualPolicy {
         return bundle
     }
     fun import(text: String): List<VisualRule> = decode(text).rules.map {
-        it.copy(state = VisualRuleState.CANDIDATE, evidence = emptyList(), homeScene = "", homeHash = "", awaitingLocalReview = true, lastResult = "已导入，等待本机 AI 重新识别")
+        it.copy(state = VisualRuleState.CANDIDATE, evidence = emptyList(), manualConfirmation=null,homeScene = "", homeHash = "", awaitingLocalReview = true, lastResult = "已导入，等待本机 AI 重新识别")
     }
 }

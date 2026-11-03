@@ -30,6 +30,7 @@ class SmartDemoActivity : Activity() {
         override fun onTouchEvent(e: MotionEvent): Boolean {
             if (e.action==MotionEvent.ACTION_UP && ad && e.x>width*.70 && e.y<height*.12) {
                 ad=false;id=R.id.smart_demo_home;invalidate();sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+                (application as com.haibo.tiaotiao.TiaoApplication).repository.log(packageName,"演示控件已实际收到触控并关闭（屏幕 ${e.rawX.toInt()},${e.rawY.toInt()}）")
                 return true
             }
             return true

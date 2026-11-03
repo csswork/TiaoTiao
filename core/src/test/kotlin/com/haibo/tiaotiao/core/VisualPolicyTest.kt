@@ -10,6 +10,20 @@ class VisualPolicyTest {
     private val rule = VisualRule(packageName = "cn.damai", versionCode = 1, scene = screen.fingerprint(), target = area,
         targetHash = "0".repeat(64), label = "skip", source = "test", createdAt = 0)
     private val ad = VisualSignals(true, 4, listOf(area), false)
+    @Test fun `a tight text box refines a coarse model box by centre despite unequal edges`() {
+        val coarse=Area(.899f,.036f,.966f,.067f)
+        val text=Area(.90416664f,.064375f,.95f,.07375f)
+        assertFalse(text.near(coarse))
+        assertEquals(text,VisualPolicy.controlTarget(coarse,listOf(text)))
+        assertTrue(VisualPolicy.canAttempt(rule.copy(target=coarse),screen,ad.copy(skips=listOf(text)),rule.targetHash))
+    }
+    @Test fun `nested node and OCR boxes select the precise point while distinct controls remain ambiguous`() {
+        val text=Area(.84f,.05f,.91f,.07f)
+        assertEquals(text,VisualPolicy.controlTarget(area,listOf(area,text)))
+        val first=Area(.85f,.05f,.88f,.07f);val second=Area(.885f,.05f,.915f,.07f)
+        assertNull(VisualPolicy.controlTarget(area,listOf(first,second)))
+        assertNull(VisualPolicy.controlTarget(area,listOf(Area(.1f,.7f,.2f,.8f))))
+    }
     @Test fun `visual target maps to a small actionable control and excludes ad containers`() {
         val control=ScreenNode("0.1","cn.damai:id/skip","android.view.View","",true,area)
         val full=ScreenNode("0","cn.damai:id/ad","android.widget.FrameLayout","",true,Area(0f,0f,1f,1f))

@@ -1,6 +1,7 @@
 package com.haibo.tiaotiao.fixture
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -54,13 +55,9 @@ class FixtureActivity : Activity() {
     private fun home() {
         if(ended) return
         ended=true;handler.removeCallbacksAndMessages(null)
-        val root=FrameLayout(this).apply {id=R.id.home_root;setBackgroundColor(Color.WHITE)}
-        root.addView(TextView(this).apply {text="首页";textSize=28f;gravity=Gravity.CENTER},
-            FrameLayout.LayoutParams(280,150,Gravity.BOTTOM or Gravity.START).apply {bottomMargin=90})
-        root.addView(TextView(this).apply {text="我的";textSize=28f;gravity=Gravity.CENTER},
-            FrameLayout.LayoutParams(280,150,Gravity.BOTTOM or Gravity.END).apply {bottomMargin=90})
-        setContentView(root)
-        root.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+        if(intent.getBooleanExtra("new_window",false)) {
+            startActivity(Intent(this,FixtureHomeActivity::class.java));finish()
+        } else renderFixtureHome(this)
     }
     private fun imagePage(inert: Boolean) {
         val image=ImageAdvertisement(inert)
@@ -88,8 +85,11 @@ class FixtureActivity : Activity() {
     }
     /** Optional inert accessibility target; actual control always handles touch. */
     private inner class ImageAdvertisement(private val otherClose: Boolean) : View(this@FixtureActivity) {
-        private var remaining=8
+        private var remaining=intent.getIntExtra("ad_seconds",8).coerceIn(1,60)
         private var showing=true
+        private var firstTouchIgnored=false
+        private val ignoreFirst=intent.getBooleanExtra("ignore_first_touch",false)
+        private val localSkip=intent.getBooleanExtra("local_skip",false)
         private val paint=android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
         init {importantForAccessibility=IMPORTANT_FOR_ACCESSIBILITY_YES
             fun tick() {if(showing) {remaining--;if(remaining<=0) {showing=false};invalidate();this@FixtureActivity.handler.postDelayed({tick()},1000)}}
@@ -102,12 +102,22 @@ class FixtureActivity : Activity() {
                 paint.color=Color.rgb(245,225,171);c.drawCircle(width*.45f,height*.43f,width*.28f,paint)
                 paint.color=Color.rgb(180,90,90);c.drawRect(width*.55f,height*.45f,width*.85f,height*.72f,paint)
                 paint.color=Color.WHITE;paint.strokeWidth=7f
-                c.drawLine(width*.88f,height*.05f,width*.93f,height*.09f,paint)
-                c.drawLine(width*.93f,height*.05f,width*.88f,height*.09f,paint)
+                if(!ignoreFirst && !localSkip) {
+                    c.drawLine(width*.88f,height*.05f,width*.93f,height*.09f,paint)
+                    c.drawLine(width*.93f,height*.05f,width*.88f,height*.09f,paint)
+                }
+                if(ignoreFirst || localSkip) {
+                    paint.textSize=40f;c.drawText("广告",width*.04f,height*.07f,paint)
+                    c.drawText(if(localSkip) "跳过" else "关闭",width*.86f,height*.08f,paint)
+                }
             } else {
                 paint.color=Color.BLACK;paint.textSize=64f
                 c.drawText("首页",width*.13f,height*.9f,paint);c.drawText("我的",width*.7f,height*.9f,paint)
-                if(otherClose) c.drawText("×",width*.45f,height*.4f,paint)
+                if(otherClose) {
+                    paint.strokeWidth=7f
+                    c.drawLine(width*.88f,height*.05f,width*.93f,height*.09f,paint)
+                    c.drawLine(width*.93f,height*.05f,width*.88f,height*.09f,paint)
+                }
             }
         }
         fun closeFromTouch() {
@@ -117,11 +127,32 @@ class FixtureActivity : Activity() {
             sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
         }
         override fun onTouchEvent(e: android.view.MotionEvent): Boolean {
+            if(intent.getBooleanExtra("record_touch",false) && e.action in setOf(android.view.MotionEvent.ACTION_DOWN,android.view.MotionEvent.ACTION_UP)) {
+                File(filesDir,"touch_events").appendText("${e.action},${e.rawX},${e.rawY},${e.flags}\n")
+            }
+            if(intent.getBooleanExtra("reject_a11y_touch",false) && e.flags and 0x800!=0) return true
             if(showing && e.action==android.view.MotionEvent.ACTION_UP && e.x>width*.8f && e.y<height*.14f) {
+                if(ignoreFirst && !firstTouchIgnored) {
+                    firstTouchIgnored=true;File(filesDir,"ignored_touch").writeText("1");return true
+                }
                 closeFromTouch()
             }
             return true
         }
     }
     override fun onDestroy() {handler.removeCallbacksAndMessages(null);super.onDestroy()}
+}
+
+class FixtureHomeActivity : Activity() {
+    override fun onCreate(state: Bundle?) {super.onCreate(state);renderFixtureHome(this)}
+}
+
+private fun renderFixtureHome(activity: Activity) {
+    val root=FrameLayout(activity).apply {id=R.id.home_root;setBackgroundColor(Color.WHITE)}
+    root.addView(TextView(activity).apply {text="首页";textSize=28f;gravity=Gravity.CENTER},
+        FrameLayout.LayoutParams(280,150,Gravity.BOTTOM or Gravity.START).apply {bottomMargin=90})
+    root.addView(TextView(activity).apply {text="我的";textSize=28f;gravity=Gravity.CENTER},
+        FrameLayout.LayoutParams(280,150,Gravity.BOTTOM or Gravity.END).apply {bottomMargin=90})
+    activity.setContentView(root)
+    root.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
 }

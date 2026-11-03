@@ -17,12 +17,14 @@ class TiaoApplication : Application() {
     val repository by lazy { AppRepository(this) }
     val appLabels by lazy { AppLabels(this) }
     val appClassification by lazy { com.haibo.tiaotiao.data.AppClassification(this, repository) }
+    val enhancedTouch by lazy {com.haibo.tiaotiao.touch.EnhancedTouch(this)}
     @Volatile private var learner: com.haibo.tiaotiao.data.VisualLearner?=null
     var visualLearner: com.haibo.tiaotiao.data.VisualLearner
         get()=learner ?: com.haibo.tiaotiao.data.VisualLearner(this,repository).also {learner=it}
         internal set(value) {learner=value}
     override fun onCreate() {
         super.onCreate()
+        enhancedTouch
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             private var resumed=WeakReference<Activity>(null)
             override fun onActivityResumed(activity: Activity) {

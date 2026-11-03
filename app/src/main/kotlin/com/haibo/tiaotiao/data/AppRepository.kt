@@ -23,7 +23,11 @@ data class AppSettings(
     val syncUrl: String = "",
     val syncEtag: String = "",
     @kotlinx.serialization.json.JsonNames("smartDamai") val automaticLearning: Boolean = true,
-    val visionModel: String = "google/gemini-2.5-flash-lite",
+    val visionModel: String = "typesafe-ai/jev-1.14.0",
+    val visionProvider: VisionProvider = VisionProvider.VERCEL_AI_GATEWAY,
+    val visionRevision: Long = 0,
+    val showCheckBubble: Boolean = true,
+    val enhancedTouch: Boolean = false,
 )
 @Serializable data class LogEntry(val at: Long, val packageName: String, val message: String, val id: String = UUID.randomUUID().toString())
 @Serializable data class StoredSample(val ruleId: String, val source: String, val screen: ScreenSnapshot)
@@ -32,7 +36,9 @@ data class AppSettings(
     val state: ConnectionState = ConnectionState.UNTESTED,
     val message: String = "尚未测试模型连接",
     val checkedAt: Long = 0,
-)
+) {
+    fun blocksRequests()=state==ConnectionState.FAILED && Regex("HTTP (?:401|403|404|451)\\b").containsMatchIn(message)
+}
 
 class AppRepository(private val context: Context) {
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -47,6 +53,7 @@ class AppRepository(private val context: Context) {
     private val logsFile = AtomicFile(File(context.filesDir, "logs.json"))
     private val samplesDir = File(context.filesDir, "samples").apply { mkdirs() }
     val vault = SecretVault(context)
+    val previews=VisualPreviewStore(context.filesDir)
     private val visualFile = AtomicFile(File(context.filesDir, "visual_rules.json"))
     private val _visualRules = MutableStateFlow(runCatching {
         VisualPolicy.decode(String(visualFile.readFully(), Charsets.UTF_8)).rules.map(VisualPolicy::migrateExecution)
@@ -55,6 +62,10 @@ class AppRepository(private val context: Context) {
         emptyList()
     })
     val visualRules = _visualRules.asStateFlow()
+    @Synchronized fun confirmVisual(rule: VisualRule) {
+        val current=_visualRules.value.find {it.id==rule.id && it.behavior()==rule.behavior()} ?: error("方案已改变，请重新查看后确认")
+        putVisual(VisualPolicy.confirm(current,System.currentTimeMillis()))
+    }
     @Synchronized fun putVisual(rule: VisualRule) {
         VisualPolicy.validate(rule)
         val next = _visualRules.value.filterNot { it.id == rule.id } + rule
@@ -71,6 +82,39 @@ class AppRepository(private val context: Context) {
     @Synchronized fun removeVisual(id: String) {
         val next = _visualRules.value.filterNot { it.id == id }
         write(visualFile, ruleJson.encodeToString(VisualBundle(rules = next))); _visualRules.value = next
+        previews.remove(id)
+    }
+    /** Only masked JPEGs produced by the capture pipeline enter the persistent preview store. */
+    suspend fun savePreview(rule: VisualRule,jpeg: ByteArray,area: Area,kind: PreviewKind,contextHash: String=rule.contextHash) = withContext(Dispatchers.IO) {
+        try {synchronized(this@AppRepository) {
+            if(_visualRules.value.none {it.id==rule.id && it.behavior()==rule.behavior()}) return@synchronized
+            previews.save(rule.id,jpeg,area,kind,contextHash)
+        }} catch(c: CancellationException) {throw c}
+        catch(_: Exception) {log(rule.packageName,"截图未能保存，方案与结果检查继续")}
+    }
+    suspend fun adjustTarget(rule: VisualRule,preview: VisualPreview,x: Float,y: Float): String = withContext(Dispatchers.IO) {
+        require(x.isFinite() && y.isFinite() && x in 0f..1f && y in 0f..1f) {"点击位置超出图片"}
+        val area=Area((x-.012f).coerceIn(0f,.976f),(y-.006f).coerceIn(0f,.988f),
+            (x-.012f).coerceIn(0f,.976f)+.024f,(y-.006f).coerceIn(0f,.988f)+.012f)
+        val jpeg=previews.file(preview).readBytes()
+        val hash=previews.patch(jpeg,area)
+        synchronized(this@AppRepository) {
+            val owner=_visualRules.value.find {it.id==preview.ruleId}
+            check(owner!=null && (owner.id==rule.id || VisualProposals.sameTarget(owner,rule)) &&
+                preview in previews.entries.value && _visualRules.value.any {it.id==rule.id && it.behavior()==rule.behavior()}) {"方案已改变，请重新打开"}
+            val s=settings.value
+            val context=preview.contextHash.ifBlank {owner.contextHash}
+            putVisual(rule.copy(target=area,targetHash=hash,nodeTarget=null,nodeScene="",tapMethod=TapMethod.GESTURE,
+                contextHash=context,
+                userAdjusted=true,source="${s.visionProvider.name}:${s.visionModel}",state=VisualRuleState.CANDIDATE,
+                learningRevision=rule.learningRevision+1,
+                manualConfirmation=null,
+                evidence=emptyList(),homeHash="",homeScene="",automaticFailures=0,retryAfter=0,awaitingLocalReview=false,
+                lastResult="点击位置已手动调整，等待重新检查"))
+            runCatching {previews.save(rule.id,jpeg,area,PreviewKind.MANUAL,context)}
+                .onFailure {log(rule.packageName,"点击位置已保存，调整预览图片未能保存")}
+        }
+        "点击位置已保存，旧验证记录已清除"
     }
     fun exportVisual() = ruleJson.encodeToString(VisualBundle(rules = _visualRules.value.filter { it.active() }))
     @Synchronized fun importVisual(text: String): Int {
@@ -82,7 +126,30 @@ class AppRepository(private val context: Context) {
         }
         return count
     }
-    private val _settings = MutableStateFlow(runCatching { ruleJson.decodeFromString<AppSettings>(prefs.getString("settings", "")!!) }.getOrDefault(AppSettings()))
+    private fun loadSettings(): AppSettings {
+        val saved=runCatching {ruleJson.decodeFromString<AppSettings>(prefs.getString("settings","")!!)}.getOrDefault(AppSettings())
+        var updated=if(prefs.getBoolean("jevImageMigration1",false)) saved else saved.copy(
+            model=if(saved.jevProvider==JevProvider.VERCEL_AI_GATEWAY && saved.model=="typesafe-ai/jev") "typesafe-ai/jev-1.14.0" else saved.model,
+            visionModel=if(saved.visionModel=="google/gemini-2.5-flash-lite") "typesafe-ai/jev-1.14.0" else saved.visionModel)
+        if(!prefs.getBoolean("deepseekOfficialMigration1",false)) updated=updated.copy(
+            visionProvider=VisionProvider.DEEPSEEK_OFFICIAL,visionModel="deepseek-flash",visionRevision=updated.visionRevision+1)
+        if(!prefs.getBoolean("jevOfficialMigration1",false)) updated=updated.copy(
+            jevProvider=JevProvider.TYPE_SAFE,model="jev-latest",visionProvider=VisionProvider.JEV_OFFICIAL,
+            visionModel="jev-latest",visionRevision=updated.visionRevision+1)
+        if(updated.jevProvider!=saved.jevProvider || updated.model!=saved.model || updated.visionProvider!=saved.visionProvider || updated.visionModel!=saved.visionModel)
+            prefs.edit().remove("modelConnection").remove("visionConnection").apply()
+        if(updated.visionModel!=saved.visionModel || updated.visionProvider!=saved.visionProvider) {
+            val migrated=_visualRules.value.map {if(it.state==VisualRuleState.CANDIDATE)
+                it.copy(awaitingLocalReview=true,evidence=emptyList(),homeScene="",homeHash="",lastResult="图片模型已切换，等待重新识别") else it}
+            write(visualFile,ruleJson.encodeToString(VisualBundle(rules=migrated)));_visualRules.value=migrated
+            File(context.filesDir,"visual_pending").listFiles().orEmpty().forEach {it.delete()}
+            context.getSharedPreferences("visual_cache",Context.MODE_PRIVATE).edit().clear().apply()
+        }
+        prefs.edit().putString("settings",ruleJson.encodeToString(updated)).putBoolean("jevImageMigration1",true)
+            .putBoolean("deepseekOfficialMigration1",true).putBoolean("jevOfficialMigration1",true).apply()
+        return updated
+    }
+    private val _settings = MutableStateFlow(loadSettings())
     val settings = _settings.asStateFlow()
     private var modelConfigGeneration = 0L
     private val _modelConnection = MutableStateFlow(runCatching {
@@ -90,6 +157,17 @@ class AppRepository(private val context: Context) {
             .let { if (it.state == ConnectionState.CHECKING) ModelConnection() else it }
     }.getOrDefault(ModelConnection()))
     val modelConnection = _modelConnection.asStateFlow()
+    private var visionCheckGeneration=0L
+    private val _visionConnection=MutableStateFlow(runCatching {
+        ruleJson.decodeFromString<ModelConnection>(prefs.getString("visionConnection","")!!)
+            .let {if(it.state==ConnectionState.CHECKING) ModelConnection() else it}
+    }.getOrDefault(ModelConnection()))
+    val visionConnection=_visionConnection.asStateFlow()
+    @Synchronized fun recordVisionFailure(config: AppSettings,error: String) {
+        val code=Regex("HTTP (401|403|404|451)\\b").find(error)?.groupValues?.get(1) ?: return
+        if(sameVision(config) && _visionConnection.value.state!=ConnectionState.CHECKING)
+            saveVisionConnection(ModelConnection(ConnectionState.FAILED,"${config.visionProvider.displayName} 请求未通过（HTTP $code），请检查密钥或网络后重新测试",System.currentTimeMillis()))
+    }
     val detection = MutableStateFlow<LogEntry?>(null)
     private val _rules = MutableStateFlow(runCatching { RuleCodec.decode(String(rulesFile.readFully(), Charsets.UTF_8)).rules }.getOrElse {
         // Retain any damaged source for recovery; never execute a partially decoded rule set.
@@ -114,6 +192,9 @@ class AppRepository(private val context: Context) {
     @Synchronized fun updateSettings(transform: (AppSettings) -> AppSettings) {
         val updated = transform(_settings.value)
         if (updated.jevProvider != _settings.value.jevProvider || updated.model != _settings.value.model) invalidateModelConnection()
+        if(!sameVision(updated)) {
+            visionCheckGeneration++;saveVisionConnection(ModelConnection())
+        }
         prefs.edit().putString("settings", ruleJson.encodeToString(updated)).apply()
         _settings.value = updated
     }
@@ -121,7 +202,13 @@ class AppRepository(private val context: Context) {
     @Synchronized fun configureAi(provider: JevProvider, model: String, key: String) {
         provider.validateModel(model)
         if(key.isNotBlank()) vault.set("jevKey",key)
-        updateSettings {it.copy(jevProvider=provider,model=model)}
+        updateSettings {s ->
+            if(s.visionProvider==VisionProvider.DEEPSEEK_OFFICIAL) s.copy(jevProvider=provider,model=model)
+            else {
+                val vision=if(provider==JevProvider.TYPE_SAFE) VisionProvider.JEV_OFFICIAL else VisionProvider.VERCEL_AI_GATEWAY
+                s.copy(jevProvider=provider,model=model,visionProvider=vision,visionModel=vision.defaultModel,visionRevision=s.visionRevision+1)
+            }
+        }
         invalidateModelConnection()
     }
     @Synchronized fun analysisKey(provider: JevProvider, model: String, vision: Boolean=false): String? {
@@ -130,8 +217,56 @@ class AppRepository(private val context: Context) {
             (if(vision) s.visionModel else s.model)!=model) return null
         return vault.get("jevKey").takeIf {it.isNotBlank()}
     }
+    fun visionKeyAvailable() = settings.value.let {s -> when(s.visionProvider) {
+        VisionProvider.JEV_OFFICIAL -> s.jevProvider==JevProvider.TYPE_SAFE && vault.contains("jevKey")
+        VisionProvider.DEEPSEEK_OFFICIAL -> vault.contains("deepseekKey")
+        VisionProvider.VERCEL_AI_GATEWAY -> s.jevProvider==JevProvider.VERCEL_AI_GATEWAY && vault.contains("jevKey")
+    }}
+    fun sameVision(config: AppSettings) = settings.value.let {it.visionProvider==config.visionProvider &&
+        it.visionModel==config.visionModel && it.visionRevision==config.visionRevision}
+    @Synchronized fun visionKey(config: AppSettings,probe: Boolean=false): String? {
+        val s=settings.value
+        if(!sameVision(config) || (!probe && (!s.enabled || !s.cloudEnabled || !s.automaticLearning))) return null
+        return when(s.visionProvider) {
+            VisionProvider.JEV_OFFICIAL -> if(s.jevProvider==JevProvider.TYPE_SAFE) vault.get("jevKey") else ""
+            VisionProvider.DEEPSEEK_OFFICIAL -> vault.get("deepseekKey")
+            VisionProvider.VERCEL_AI_GATEWAY -> if(s.jevProvider==JevProvider.VERCEL_AI_GATEWAY) vault.get("jevKey") else ""
+        }.takeIf {it.isNotBlank()}
+    }
+    @Synchronized fun configureVision(provider: VisionProvider,model: String,key: String) {
+        provider.validateModel(model)
+        if(provider==VisionProvider.DEEPSEEK_OFFICIAL) {
+            if(key.isNotBlank()) {
+                require(key.all {it.code in 33..126}) {"DeepSeek 官方 Key 格式无效"}
+                vault.set("deepseekKey",key)
+            }
+            require(vault.contains("deepseekKey")) {"请填写 DeepSeek 官方 Key"}
+        } else {
+            require(key.isBlank()) {"Jev 图片分析沿用上方已保存的 Jev Key"}
+            val expected=if(provider==VisionProvider.JEV_OFFICIAL) JevProvider.TYPE_SAFE else JevProvider.VERCEL_AI_GATEWAY
+            require(settings.value.jevProvider==expected && vault.contains("jevKey")) {"请先配置对应的 Jev 服务与 Key"}
+        }
+        updateSettings {it.copy(visionProvider=provider,visionModel=model,visionRevision=it.visionRevision+1)}
+    }
+    @Synchronized fun clearDeepseekKey() {
+        vault.set("deepseekKey","")
+        updateSettings {it.copy(visionRevision=it.visionRevision+1)}
+    }
+    @Synchronized fun beginVisionCheck(): Long {
+        visionCheckGeneration++;saveVisionConnection(ModelConnection(ConnectionState.CHECKING,"正在测试图片模型连接…"))
+        return visionCheckGeneration
+    }
+    @Synchronized fun finishVisionCheck(generation: Long,state: ConnectionState,message: String) {
+        if(generation==visionCheckGeneration) saveVisionConnection(ModelConnection(state,message,System.currentTimeMillis()))
+    }
+    private fun saveVisionConnection(value: ModelConnection) {
+        prefs.edit().putString("visionConnection",ruleJson.encodeToString(value)).apply();_visionConnection.value=value
+    }
     @Synchronized fun clearAiCredentials() {
-        vault.set("jevKey","");updateSettings {it.copy(cloudEnabled=false)};invalidateModelConnection()
+        vault.set("jevKey","")
+        updateSettings {if(it.visionProvider!=VisionProvider.DEEPSEEK_OFFICIAL)
+            it.copy(cloudEnabled=false,visionRevision=it.visionRevision+1) else it}
+        invalidateModelConnection()
     }
     @Synchronized fun invalidateModelConnection() {
         modelConfigGeneration++
@@ -163,6 +298,18 @@ class AppRepository(private val context: Context) {
         logWrites.trySend(entries)
     }
     @Synchronized fun clearLogs() { _logs.value = emptyList();logWrites.trySend(emptyList()) }
+    /** Caller first stops scans and joins learning jobs so old results cannot reappear. */
+    @Synchronized fun clearResults() {
+        write(rulesFile,ruleJson.encodeToString(RuleBundle(exportedAt=System.currentTimeMillis(),rules=emptyList())))
+        write(visualFile,ruleJson.encodeToString(VisualBundle(rules=emptyList())))
+        _rules.value=emptyList();_visualRules.value=emptyList()
+        samplesDir.listFiles().orEmpty().forEach {it.deleteRecursively()};sampleCount.value=0
+        baselinePrefs.edit().clear().apply()
+        listOf("rules.recovery.json","visual_rules.recovery.json").forEach {File(context.filesDir,it).delete()}
+        File(context.filesDir,"last_execution").deleteRecursively()
+        previews.clear()
+        detection.value=null;clearLogs()
+    }
     @Synchronized fun put(rule: SkipRule) {
         RuleCodec.validate(rule)
         val next = _rules.value.filterNot { it.id == rule.id } + rule

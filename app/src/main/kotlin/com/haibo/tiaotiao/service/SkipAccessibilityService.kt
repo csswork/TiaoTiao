@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.app.KeyguardManager
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.os.PowerManager
@@ -22,18 +23,33 @@ import com.haibo.tiaotiao.network.JevClient
 import com.haibo.tiaotiao.network.modelErrorMessage
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import com.haibo.tiaotiao.touch.routeTouch
 import java.io.FileDescriptor
 import java.io.PrintWriter
 import java.lang.ref.WeakReference
 
 class SkipAccessibilityService : AccessibilityService() {
     companion object {
+        internal const val GESTURE_PRESS_MS=100L
         @Volatile private var serviceRef = WeakReference<SkipAccessibilityService>(null)
         val instance: SkipAccessibilityService? get() = serviceRef.get()
     }
     private val repository get() = (application as TiaoApplication).repository
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val gate = SessionGate()
+    private val checkBubble by lazy {CheckBubble(this,scope)}
+    private var bubbleSession: Pair<String,Long>?=null
+    internal val diagnosticBubbleVisible get()=checkBubble.visible
+    internal val diagnosticBubbleShows get()=checkBubble.shows
+    internal fun checkStatus(pkg: String,text: String,finished: Boolean=false) {
+        if(text!="正在检查" || finished) return
+        if(!repository.settings.value.showCheckBubble || dashboardVisible() ||
+            !getSystemService(PowerManager::class.java).isInteractive || getSystemService(KeyguardManager::class.java).isKeyguardLocked ||
+            knownOwner?.second!=pkg) return
+        checkBubble.show("TiaoTiao 正在检查",1200)
+    }
     private val jev by lazy { JevClient() }
     private var scanJob: Job? = null
     private var overlay: LinearLayout? = null
@@ -55,12 +71,28 @@ class SkipAccessibilityService : AccessibilityService() {
     private var nodeSnapshotAt=0L
     private var nextNodeRead=0L
     private var cachedVersion: Pair<String,Long>?=null
+    @Volatile private var tracePackage: String?=null
+    private var traceSnapshotPending=false
+    @Synchronized fun claimTraceSnapshot(pkg: String): Boolean {
+        if(tracePackage!=pkg || !traceSnapshotPending) return false
+        traceSnapshotPending=false;return true
+    }
+    @Synchronized fun claimTrace(pkg: String): Boolean {
+        if(tracePackage!=pkg) return false
+        tracePackage=null;return true
+    }
     @Volatile var diagnosticTreeReads=0L
         private set
     private var ignoredDashboardEvents=0L
+    private var resettingResults=false
+    @Volatile internal var diagnosticHeldPackage: String?=null
+        private set
+    private val touchLane=Mutex()
+    @Volatile internal var touchExecutions: List<com.haibo.tiaotiao.touch.TouchExecution> = emptyList()
+        private set
     private fun dashboardVisible()=(application as TiaoApplication).foregroundScreen==TiaoApplication.ForegroundScreen.DASHBOARD
     private fun stopDashboardScan() {
-        scanJob?.cancel();nodeRead?.cancel();gate.observe(null,SystemClock.elapsedRealtime());hideOverlay()
+        scanJob?.cancel();nodeRead?.cancel();gate.observe(null,SystemClock.elapsedRealtime());hideOverlay();checkBubble.hide()
         targetEventPackage=null;eventWindowId=null
         knownOwner=null;ownerRevision++;clearNodes()
         lastReadState="管理界面不参与广告识别"
@@ -75,7 +107,7 @@ class SkipAccessibilityService : AccessibilityService() {
             visualWindow()
         },
         open = { generation, pkg -> repository.settings.value.enabled && gate.generation == generation && gate.isOpen(pkg,SystemClock.elapsedRealtime()) },
-        tap = { generation, screen, area, rule -> smartTap(generation,screen,area,rule) }).also { autoLearning = it }
+        tap = { generation, screen, area, rule, retry -> smartTap(generation,screen,area,rule,retry) }).also { autoLearning = it }
     private val reportedReasons = mutableSetOf<String>()
     private fun report(pkg: String, reason: String, message: String) {
         if (diagnosticPackage != pkg) { diagnosticPackage = pkg; reportedReasons.clear() }
@@ -92,6 +124,7 @@ class SkipAccessibilityService : AccessibilityService() {
             var previous: com.haibo.tiaotiao.data.AppSettings?=null
             repository.settings.collectLatest { settings ->
                 val old=previous;previous=settings
+                if(!settings.showCheckBubble || !settings.enabled) checkBubble.hide()
                 if(old==null || old.enabled!=settings.enabled || old.automaticLearning!=settings.automaticLearning || old.packages!=settings.packages) {
                     scanJob?.cancel()
                     nodeRead?.cancel();clearNodes();nextNodeRead=0;cachedVersion=null
@@ -102,7 +135,7 @@ class SkipAccessibilityService : AccessibilityService() {
         }
     }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || !repository.settings.value.enabled) return
+        if (event == null || resettingResults || !repository.settings.value.enabled) return
         val eventPackage = event.packageName?.toString().orEmpty()
         if(dashboardVisible()) {
             ignoredDashboardEvents++
@@ -129,7 +162,7 @@ class SkipAccessibilityService : AccessibilityService() {
                 gate.observeWindow(eventPackage,true,targetEventAt)
             } else {
                 autoLearning?.leaving(eventPackage)
-                scanJob?.cancel();gate.observeWindow(eventPackage,true,SystemClock.elapsedRealtime());hideOverlay()
+                scanJob?.cancel();gate.observeWindow(eventPackage,true,SystemClock.elapsedRealtime());hideOverlay();checkBubble.hide()
                 targetEventPackage=null;clearNodes();cachedVersion=null
                 diagnosticPackage=null;reportedReasons.clear()
                 return
@@ -150,6 +183,7 @@ class SkipAccessibilityService : AccessibilityService() {
         scheduleScan()
     }
     private fun scheduleScan() {
+        if(resettingResults) return
         if(dashboardVisible() && targetEventPackage==null) return
         if (scanJob?.isActive == true) return
         scanJob = scope.launch {
@@ -169,10 +203,11 @@ class SkipAccessibilityService : AccessibilityService() {
             }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { report(gate.packageName.orEmpty(), "error", "检测未完成，已结束本轮；可重新打开应用重试") }
+            finally {if(!gate.actionDispatched) targetEventPackage?.let {checkStatus(it,"本轮检查结束",true)}}
         }
     }
     fun restartSession() {
-        scanJob?.cancel(); gate.reset(); hideOverlay()
+        scanJob?.cancel(); gate.reset(); hideOverlay();checkBubble.hide();bubbleSession=null
         targetEventPackage = null; eventWindowId = null
         diagnosticPackage = null; reportedReasons.clear()
         clearNodes();cachedVersion=null;nextNodeRead=0
@@ -195,7 +230,7 @@ class SkipAccessibilityService : AccessibilityService() {
             knownOwner=window.id to owner
             if(owner!=packageName && owner !in repository.settings.value.packages) {
                 autoLearning?.leaving(owner);gate.observeWindow(owner,true,SystemClock.elapsedRealtime())
-                scanJob?.cancel();targetEventPackage=null;clearNodes();cachedVersion=null;hideOverlay()
+                scanJob?.cancel();targetEventPackage=null;clearNodes();cachedVersion=null;hideOverlay();checkBubble.hide()
                 diagnosticPackage=null;reportedReasons.clear()
             } else {
                 gate.observeWindow(owner,true,SystemClock.elapsedRealtime())
@@ -289,23 +324,24 @@ class SkipAccessibilityService : AccessibilityService() {
             @Suppress("DEPRECATION") root.recycle()
             return null
         }
-        val metrics = resources.displayMetrics
+        val metrics = DisplayCoordinates.size(this)
         diagnosticTreeReads++
-        return ScreenReader.read(root, version, metrics.widthPixels, metrics.heightPixels).also {
+        return ScreenReader.read(root, version, metrics.x, metrics.y).also {
             lastReadState = "已读取 ${it.screen.nodes.size} 个节点，界面完整=${it.screen.complete}"
         }
     }
     private fun visualWindow(): ScreenSnapshot? {
         if (!getSystemService(PowerManager::class.java).isInteractive || getSystemService(KeyguardManager::class.java).isKeyguardLocked) return null
         val window=selectedWindow(windows) ?: return null
+        if(android.os.Build.VERSION.SDK_INT>=30 && window.displayId!=android.view.Display.DEFAULT_DISPLAY) return null
         val pkg=knownOwner?.takeIf {it.first==window.id}?.second ?: run {probeOwner();return null}
         val version=cachedVersion?.takeIf {it.first==pkg}?.second ?: runCatching { @Suppress("DEPRECATION") packageManager.getPackageInfo(pkg,0).let {
             if (android.os.Build.VERSION.SDK_INT>=28) it.longVersionCode else @Suppress("DEPRECATION") it.versionCode.toLong()
         } }.getOrNull()?.also {cachedVersion=pkg to it} ?: return null
-        val m=resources.displayMetrics
+        val m=DisplayCoordinates.size(this)
         val nodes=nodeSnapshot?.takeIf {!gate.actionDispatched && it.packageName==pkg && it.versionCode==version && it.windowId==window.id && SystemClock.elapsedRealtime()-nodeSnapshotAt<900}
         // Metadata only: visual verification must not wait for every home-page node/provider.
-        return ScreenSnapshot(pkg,version,m.widthPixels,m.heightPixels,nodes?.nodes.orEmpty(),System.currentTimeMillis(),window.id,complete=nodes?.complete==true)
+        return ScreenSnapshot(pkg,version,m.x,m.y,nodes?.nodes.orEmpty(),System.currentTimeMillis(),window.id,complete=nodes?.complete==true)
     }
     private fun isDemo(screen: ScreenSnapshot) = screen.packageName == packageName && screen.nodes.any { it.resourceId.endsWith(":id/demo_skip") }
     private fun eligible(screen: ScreenSnapshot) = (screen.packageName in repository.settings.value.packages && screen.packageName != packageName) || isDemo(screen) || visualDemo(screen)
@@ -319,7 +355,12 @@ class SkipAccessibilityService : AccessibilityService() {
                 val now=SystemClock.elapsedRealtime()
                 gate.observe(screen.packageName,now)
                 if(!gate.isOpen(screen.packageName,now)) return
-                report(screen.packageName,"begin","开屏检测已启动：Jev 控件分析与端侧画面识别并行")
+                if(bubbleSession!=(screen.packageName to gate.generation)) {
+                    bubbleSession=screen.packageName to gate.generation
+                    checkStatus(screen.packageName,"正在检查")
+                }
+                report(screen.packageName,"begin",if(repository.settings.value.visionProvider==VisionProvider.DEEPSEEK_OFFICIAL)
+                    "开屏检测已启动：DeepSeek 官方图片判断与端侧识别并行" else "开屏检测已启动：Jev 控件分析与端侧画面识别并行")
                 readNodes(screen)
                 if(repository.rules.value.any {it.packageName==screen.packageName && it.versionCode==screen.versionCode &&
                     it.status==RuleStatus.DISABLED && AdRecognition.matchesNode(it.target,screen)}) {
@@ -458,14 +499,30 @@ class SkipAccessibilityService : AccessibilityService() {
             }
         }
     }
-    private suspend fun smartTap(generation: Long, screen: ScreenSnapshot, area: Area, rule: VisualRule): Boolean {
-        if (!repository.settings.value.enabled || gate.generation != generation || !gate.isOpen(screen.packageName,SystemClock.elapsedRealtime())) return false
+    private suspend fun smartTap(generation: Long,screen: ScreenSnapshot,area: Area,rule: VisualRule,retry: Boolean=false): Boolean =
+        touchLane.withLock {smartTapLocked(generation,screen,area,rule,retry)}
+    private suspend fun smartTapLocked(generation: Long, screen: ScreenSnapshot, area: Area, rule: VisualRule,retry: Boolean): Boolean {
+        val now=SystemClock.elapsedRealtime()
+        if (!repository.settings.value.enabled || gate.generation != generation ||
+            !(if(retry) gate.canRetry(screen.packageName,now) else gate.isOpen(screen.packageName,now))) return false
         val fresh=visualWindow() ?: return false
         if(fresh.windowId!=screen.windowId || AdRecognition.scene(fresh)!=AdRecognition.scene(screen) || !area.valid() ||
             area.right-area.left>.4f || area.bottom-area.top>.18f) return false
         if(!AdRecognition.eligible(screen.packageName,repository.settings.value.packages,packageName,repository.settings.value.automaticLearning) && !visualDemo(screen)) return false
-        val node=VisualPolicy.nativeTarget(rule,fresh,area)
-        val handle=node?.let {nodeObservation?.handles?.get(it.path)}?.let {
+        val x=(area.left+area.right)/2;val y=(area.top+area.bottom)/2
+        val pixelX=(x*screen.width).toInt();val pixelY=(y*screen.height).toInt()
+        val bounds=android.graphics.Rect()
+        selectedWindow(windows)?.takeIf {it.id==screen.windowId}?.getBoundsInScreen(bounds) ?: return false
+        if(!bounds.contains(pixelX,pixelY)) return false
+        val enhanced=(application as TiaoApplication).enhancedTouch
+        val useEnhanced=repository.settings.value.enhancedTouch && enhanced.state.value==com.haibo.tiaotiao.touch.TouchConnection.READY
+        val recentNodes=nodeObservation?.takeIf {it.screen.packageName==fresh.packageName && it.screen.windowId==fresh.windowId &&
+            SystemClock.elapsedRealtime()-nodeSnapshotAt<1500}
+        val nativeTarget=VisualPolicy.nativeTarget(rule,if(fresh.complete) fresh else recentNodes?.screen ?: fresh,area)
+        if(rule.tapMethod==TapMethod.ACCESSIBILITY && (nativeTarget==null ||
+            x !in nativeTarget.bounds.left..nativeTarget.bounds.right || y !in nativeTarget.bounds.top..nativeTarget.bounds.bottom)) return false
+        val node=if(useEnhanced) null else nativeTarget
+        val handle=node?.let {recentNodes?.handles?.get(it.path)}?.let {
             @Suppress("DEPRECATION") AccessibilityNodeInfo.obtain(it)
         }
         if(handle!=null) {
@@ -475,23 +532,38 @@ class SkipAccessibilityService : AccessibilityService() {
             repository.reportDetection(screen.packageName,if(accepted) "已对 Jev 选中的原生控件发起关闭，等待结果检查" else "原生控件未接受关闭，已停止本轮")
             return accepted
         }
-        if(rule.tapMethod==TapMethod.ACCESSIBILITY) {
+        if(rule.tapMethod==TapMethod.ACCESSIBILITY && !useEnhanced) {
             repository.reportDetection(screen.packageName,"Jev 目标控件已变化，未替换成坐标盲点")
             return false
         }
-        val x=(area.left+area.right)/2;val y=(area.top+area.bottom)/2
         if(AdRecognition.candidates(fresh).count {x in it.bounds.left..it.bounds.right && y in it.bounds.top..it.bounds.bottom}>1) return false
-        repository.reportDetection(screen.packageName,"按视觉方案触控关闭位置（${(x*100).toInt()}%,${(y*100).toInt()}%），等待结果检查")
         gate.dispatched()
-        val path = Path().apply { moveTo((area.left+area.right)/2*screen.width,(area.top+area.bottom)/2*screen.height) }
-        val gesture = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path,0,60)).build()
-        return suspendCancellableCoroutine { c ->
+        val touchStarted=SystemClock.elapsedRealtime()
+        val result=routeTouch(useEnhanced,
+            system={enhanced.tap(screen.packageName,pixelX,pixelY,screen.width,screen.height)},
+            accessibility={dispatchTouch(pixelX,pixelY)})
+        val pressMs=if(result.backend=="Shizuku 系统触控") com.haibo.tiaotiao.touch.SystemTouchService.PRESS_MS else GESTURE_PRESS_MS
+        touchExecutions=(touchExecutions+com.haibo.tiaotiao.touch.TouchExecution(rule.id,result.backend,pixelX,pixelY,
+            screen.width,screen.height,pressMs,touchStarted,result.completed,if(result.backend=="Shizuku 系统触控") enhanced.lastEngine else "dispatchGesture")).takeLast(8)
+        repository.reportDetection(screen.packageName,"${result.backend}${if(result.backend=="Shizuku 系统触控") "（${enhanced.lastEngine}）" else ""}：屏幕 ${screen.width}×${screen.height}，实际触点 $pixelX,$pixelY，短点 $pressMs ms，"+
+            if(result.completed) "系统执行完成，等待检查广告是否提前关闭" else "执行失败或状态不明确，本轮不改用其他通道补点")
+        return result.completed
+    }
+    private suspend fun dispatchTouch(x: Int,y: Int): Boolean = withContext(NonCancellable) {
+        val path=Path().apply {moveTo(x.toFloat(),y.toFloat())}
+        val gesture=GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path,0,GESTURE_PRESS_MS))
+            .apply {if(android.os.Build.VERSION.SDK_INT>=30) setDisplayId(android.view.Display.DEFAULT_DISPLAY)}.build()
+        withTimeoutOrNull(1500) {suspendCancellableCoroutine { c ->
             val accepted = dispatchGesture(gesture,object : GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription) { if (c.isActive) c.resumeWith(Result.success(true)) }
-                override fun onCancelled(gestureDescription: GestureDescription) { if (c.isActive) c.resumeWith(Result.success(false)) }
+                override fun onCompleted(gestureDescription: GestureDescription) {
+                    if (c.isActive) c.resumeWith(Result.success(true))
+                }
+                override fun onCancelled(gestureDescription: GestureDescription) {
+                    if (c.isActive) c.resumeWith(Result.success(false))
+                }
             },null)
             if (!accepted && c.isActive) c.resumeWith(Result.success(false))
-        }
+        }} ?: false
     }
     private fun observeClickEffect(rule: SkipRule, generation: Long) {
         scope.launch {
@@ -553,13 +625,63 @@ class SkipAccessibilityService : AccessibilityService() {
         overlay?.let { runCatching { getSystemService(WindowManager::class.java).removeView(it) } }
         overlay = null; overlayRuleId = null; overlayIsResult = false
     }
-    override fun onInterrupt() { scanJob?.cancel(); gate.reset(); hideOverlay() }
+    override fun onInterrupt() { scanJob?.cancel(); gate.reset(); hideOverlay();checkBubble.hide() }
+    private fun resetResults() {
+        if(resettingResults) return
+        resettingResults=true
+        scope.launch {
+            try {
+                scanJob?.cancelAndJoin();scanJob=null
+                nodeRead?.cancelAndJoin();nodeRead=null
+                ownerProbe?.cancelAndJoin();ownerProbe=null
+                clearNodes();autoLearning?.close();autoLearning=null
+                gate.reset();hideOverlay();checkBubble.hide();bubbleSession=null;targetEventPackage=null;eventWindowId=null;knownOwner=null;ownerRevision++
+                diagnosticPackage=null;reportedReasons.clear();targetEventAt=0
+                tracePackage=null;traceSnapshotPending=false;cachedVersion=null;nextNodeRead=0
+                val app=application as TiaoApplication
+                val worker=app.visualLearner
+                worker.closeAndJoin()
+                withContext(Dispatchers.IO) {worker.clearPending();repository.clearResults()}
+                app.visualLearner=com.haibo.tiaotiao.data.VisualLearner(this@SkipAccessibilityService,repository)
+                lastReadState="全部规则、验证证据、样本及学习缓存已清空；配置保留"
+                if(android.os.Build.VERSION.SDK_INT>=30) learning().warmUp()
+            } catch(_: Exception) {lastReadState="结果清空未完成，请检查存储状态"}
+            finally {resettingResults=false}
+        }
+    }
     override fun dump(fd: FileDescriptor, writer: PrintWriter, args: Array<out String>) {
+        if(applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE!=0) {
+            args.firstOrNull {it.startsWith("hold-actions=")}?.substringAfter('=')?.let {pkg ->
+                if(pkg in repository.settings.value.packages) {
+                    diagnosticHeldPackage=pkg
+                    writer.println("Temporarily holding automatic actions for $pkg; configuration is unchanged")
+                }
+            }
+            if("release-actions" in args) {diagnosticHeldPackage=null;writer.println("Automatic actions resumed")}
+        }
+        if("test-vision" in args && applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE!=0) {
+            scope.launch {com.haibo.tiaotiao.network.testVisionConnection(repository)}
+            writer.println("Requested a fixed-image connection test for the selected provider")
+        }
+        if("self-demo" in args) scope.launch {
+            if(getSystemService(PowerManager::class.java).isInteractive && !getSystemService(KeyguardManager::class.java).isKeyguardLocked)
+                startActivity(Intent(this@SkipAccessibilityService,com.haibo.tiaotiao.ui.SmartDemoActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+        if("clear-demo" in args) scope.launch {withContext(Dispatchers.IO) {
+            repository.visualRules.value.filter {it.packageName==packageName && it.source=="bundled-ocr-demo"}.forEach {repository.removeVisual(it.id)}
+        }}
+        if("reset-results" in args) {resetResults();writer.println("Requested clearing all learning results; configuration is retained")}
+        args.firstOrNull {it.startsWith("trace-next=")}?.substringAfter('=')?.let {
+            if(it in repository.settings.value.packages || it==packageName) {tracePackage=it;traceSnapshotPending=true;writer.println("Armed one masked execution trace for $it")}
+        }
         writer.println("TiaoTiao detection diagnostics (no credentials or screen text)")
         writer.println("enabled=${repository.settings.value.enabled}, scanning=${scanJob?.isActive == true}, session=${gate.generation}, dispatched=${gate.actionDispatched}")
         writer.println("sessionPackage=${gate.packageName}, eventPackage=$targetEventPackage, eventWindow=$eventWindowId")
         writer.println("lastRead=$lastReadState")
         writer.println("treeReads=$diagnosticTreeReads, ignoredDashboardEvents=$ignoredDashboardEvents")
+        writer.println("rules=${repository.rules.value.size}, visualRules=${repository.visualRules.value.size}, samples=${repository.sampleCount.value}, resetting=$resettingResults")
+        writer.println("checkBubble=${checkBubble.visible}")
+        writer.println("enhancedTouch=${repository.settings.value.enhancedTouch}, channel=${(application as TiaoApplication).enhancedTouch.state.value}")
         autoLearning?.let { writer.println(it.summary()) }
         windows.forEach { writer.println("window=${it.id}, type=${it.type}, focused=${it.isFocused}, active=${it.isActive}") }
     }
@@ -567,6 +689,7 @@ class SkipAccessibilityService : AccessibilityService() {
         clearNodes()
         autoLearning?.close()
         hideOverlay(); scope.cancel(); repository.connected.value = false
+        checkBubble.hide()
         if (instance === this) serviceRef = WeakReference(null)
         super.onDestroy()
     }

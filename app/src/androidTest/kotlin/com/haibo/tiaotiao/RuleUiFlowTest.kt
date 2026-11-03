@@ -49,8 +49,9 @@ class RuleUiFlowTest {
         classifier.refresh(retry=true)
         waitUntil {classifier.state.value.apps.any {it.packageName==settings.packageName && it.category==AppCategory.TOOLS}}
         open()
-        scrollTo("查看应用列表")
-        click("查看应用列表")
+        click("应用")
+        waitUntil {find("全部应用")!=null || find("已选择的应用")!=null}
+        if(find("已选择的应用")==null) click("已选择")
         waitUntil {find("已选择的应用")!=null && find("处理 ${settings.name}")!=null}
         click("类别：全部类别")
         waitUntil {find("按类别筛选")!=null}
@@ -96,6 +97,8 @@ class RuleUiFlowTest {
         fun shell(command: String) {automation.executeShellCommand(command).use {android.os.ParcelFileDescriptor.AutoCloseInputStream(it).readBytes()}}
         shell("input keyevent KEYCODE_WAKEUP");shell("wm dismiss-keyguard")
         repository.updateSettings {it.copy(enabled=true,cloudEnabled=false,packages=emptySet())}
+        shell("settings put secure enabled_accessibility_services ''")
+        waitUntil {SkipAccessibilityService.instance==null && !repository.connected.value}
         open()
         shell("settings put secure enabled_accessibility_services ${context.packageName}/com.haibo.tiaotiao.service.SkipAccessibilityService")
         shell("settings put secure accessibility_enabled 1")
@@ -115,7 +118,8 @@ class RuleUiFlowTest {
     @Test fun statisticsOpenFilteredListsAndPreviewNeverDispatchesAnAction() {
         assumeTrue("仅在独立模拟器运行",Build.HARDWARE.contains("ranchu") || Build.HARDWARE.contains("goldfish"))
         automation=instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
-        repository.updateSettings {it.copy(enabled=false,cloudEnabled=false,packages=setOf("com.android.settings"))}
+        repository.updateSettings {it.copy(enabled=false,cloudEnabled=false,packages=setOf("com.android.settings"),
+            jevProvider=JevProvider.VERCEL_AI_GATEWAY,visionProvider=VisionProvider.VERCEL_AI_GATEWAY)}
         repository.rules.value.forEach {repository.remove(it.id)}
         repository.visualRules.value.forEach {repository.removeVisual(it.id)}
         val now=System.currentTimeMillis()
@@ -128,6 +132,9 @@ class RuleUiFlowTest {
             target=area,targetHash="01".repeat(32),label="skip",source="ui-fixture",createdAt=now-2)
         repository.putVisual(VisualPolicy.record(VisualPolicy.record(visual,"one",true,true,true,now),"two",true,true,true,now))
         repository.putVisual(visual.copy(id="ui-visual-pending",createdAt=now-3))
+        repository.putVisual(visual.copy(id="ui-visual-other-frame",createdAt=now-4,contextHash="10".repeat(32)))
+        repository.putVisual(visual.copy(id="ui-visual-node",createdAt=now-5,tapMethod=TapMethod.ACCESSIBILITY,
+            nodeScene="c".repeat(64),nodeTarget=TargetSelector("0.1","app:id/close","android.view.View","关闭",area)))
         repository.vault.set("jevKey","ui-test-not-a-real-key")
         try {
             open()
@@ -146,14 +153,12 @@ class RuleUiFlowTest {
             screenshot("ui-verified")
             click("查看点击位置与处理进度")
             waitUntil {find("点击位置预览")!=null}
-            assertNotNull(find("点击位置模拟图：屏幕右上部"))
+            assertNotNull(find("这个旧方案暂无实际广告截图。"))
+            assertNull(find("点击位置模拟图：屏幕右上部"))
             assertNull(find("查看 JSON"))
             screenshot("ui-rule-preview")
-            scrollTo("播放点击演示")
             val before=repository.logs.value.size
-            click("播放点击演示")
-            screenshot("ui-rule-tap")
-            Thread.sleep(1300)
+            assertNull(find("播放点击演示"))
             assertEquals("预览不得发起实际点击或模型请求",before,repository.logs.value.size)
             assertFalse(repository.settings.value.enabled)
             back()
@@ -165,7 +170,19 @@ class RuleUiFlowTest {
             assertNotNull(find("待处理 2"))
             assertNotNull(find("待试跳"))
             assertNotNull(find("自动学习中"))
+            assertNotNull("同一关闭目标的不同样本只能显示一个待处理任务",find("已归集 3 个识别样本"))
             screenshot("ui-pending")
+            click("已归集 3 个识别样本")
+            waitUntil {find("同一关闭目标的 3 个样本；每个样本单独检查，不叠加成功次数。")!=null}
+            click("样本 1 · 0/2")
+            assertNotNull(find("尚无保存截图；下次识别或点击时会自动补充。"))
+            assertNull(find("点击位置模拟图：屏幕右上部"))
+            scrollTo("删除方案")
+            click("删除方案")
+            waitUntil {find("将删除此学习任务及其 3 个样本。")!=null}
+            click("删除")
+            waitUntil {repository.visualRules.value.none {it.state==VisualRuleState.CANDIDATE} && find("待处理规则")!=null}
+            assertTrue("删除待处理任务不能删除已验证方案",repository.visualRules.value.single().active())
             back()
             waitUntil {find("查看应用列表")!=null}
             click("查看应用列表")
@@ -181,6 +198,148 @@ class RuleUiFlowTest {
         }
     }
 
+    @Test fun officialKeyHasItsOwnEntryAndDoesNotReuseOrClearTheGatewayCredential() {
+        assumeTrue("仅在独立模拟器运行",Build.HARDWARE.contains("ranchu") || Build.HARDWARE.contains("goldfish"))
+        automation=instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+        repository.updateSettings {it.copy(enabled=false,cloudEnabled=false,
+            visionProvider=VisionProvider.DEEPSEEK_OFFICIAL,visionModel="deepseek-flash")}
+        repository.clearDeepseekKey()
+        repository.configureAi(JevProvider.VERCEL_AI_GATEWAY,"typesafe-ai/jev-1.14.0","fake-gateway-key")
+        try {
+            assertFalse(repository.visionKeyAvailable())
+            assertNull(repository.visionKey(repository.settings.value,probe=true))
+            open()
+            waitUntil {find("填写 DeepSeek 官方 Key")!=null}
+            screenshot("ui-official-missing-key")
+            click("填写 DeepSeek 官方 Key")
+            waitUntil {find("DeepSeek 官方 API Key")!=null}
+            assertNotNull(find("DeepSeek 官方直连"))
+            screenshot("ui-official-key-entry")
+            repository.configureVision(VisionProvider.DEEPSEEK_OFFICIAL,"deepseek-flash","fake-official-key")
+            assertEquals("fake-official-key",repository.visionKey(repository.settings.value,probe=true))
+            assertEquals("fake-gateway-key",repository.vault.get("jevKey"))
+            val old=repository.settings.value
+            repository.configureVision(VisionProvider.DEEPSEEK_OFFICIAL,"deepseek-flash","")
+            assertNull("旧配置的异步请求不能使用新密钥",repository.visionKey(old,probe=true))
+            assertEquals("fake-official-key",repository.visionKey(repository.settings.value,probe=true))
+            repository.updateSettings {it.copy(cloudEnabled=true)}
+            repository.clearAiCredentials()
+            assertTrue("清除 Jev 不应关闭官方分析",repository.settings.value.cloudEnabled)
+            assertEquals("fake-official-key",repository.visionKey(repository.settings.value,probe=true))
+            repository.configureAi(JevProvider.VERCEL_AI_GATEWAY,"typesafe-ai/jev-1.14.0","fake-gateway-key")
+            repository.clearDeepseekKey()
+            assertNull(repository.visionKey(repository.settings.value,probe=true))
+            assertEquals("fake-gateway-key",repository.vault.get("jevKey"))
+        } finally {
+            repository.updateSettings {it.copy(enabled=false,cloudEnabled=false)}
+            repository.vault.set("jevKey","");repository.clearDeepseekKey()
+        }
+    }
+
+    @Test fun savedAdvertisementShowsActualPointAndAllowsEditingWithoutExecutingIt() {
+        assumeTrue("仅在独立模拟器运行",Build.HARDWARE.contains("ranchu") || Build.HARDWARE.contains("goldfish"))
+        automation=instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+        repository.updateSettings {it.copy(enabled=false,cloudEnabled=false,visionProvider=VisionProvider.JEV_OFFICIAL,visionModel="jev-latest")}
+        repository.rules.value.forEach {repository.remove(it.id)}
+        repository.visualRules.value.forEach {repository.removeVisual(it.id)}
+        val area=Area(.85f,.05f,.95f,.09f)
+        val candidate=VisualRule(id="preview-ui",packageName=context.packageName,versionCode=1,scene="b".repeat(64),sceneVersion=2,
+            target=area,targetHash="01".repeat(32),contextHash="01".repeat(32),label="skip",source="JEV_OFFICIAL:jev-latest",createdAt=1,tapMethod=TapMethod.GESTURE)
+        val rule=VisualPolicy.record(VisualPolicy.record(candidate,"one",true,true,true,1),"two",true,true,true,2)
+        repository.putVisual(rule)
+        val bitmap=android.graphics.Bitmap.createBitmap(360,800,android.graphics.Bitmap.Config.ARGB_8888)
+        val jpeg=try {
+            android.graphics.Canvas(bitmap).apply {
+                drawColor(android.graphics.Color.rgb(35,84,64))
+                drawCircle(150f,330f,90f,android.graphics.Paint().apply {color=android.graphics.Color.rgb(240,220,160)})
+            }
+            java.io.ByteArrayOutputStream().use {bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG,80,it);it.toByteArray()}
+        } finally {bitmap.recycle()}
+        runBlocking(Dispatchers.IO) {
+            repository.savePreview(rule,jpeg,area,com.haibo.tiaotiao.data.PreviewKind.RECOGNITION)
+            repository.savePreview(rule,jpeg,Area(.86f,.055f,.94f,.085f),com.haibo.tiaotiao.data.PreviewKind.ACTION)
+        }
+        val oldAction=repository.previews.entries.value.first {it.kind==com.haibo.tiaotiao.data.PreviewKind.ACTION}
+        val savedFile=repository.previews.file(oldAction)
+        assertTrue(savedFile.exists())
+        assertEquals(2,com.haibo.tiaotiao.data.VisualPreviewStore(context.filesDir).entries.value.size)
+        open();click("查看已验证列表");click("查看点击位置与处理进度")
+        click("调整点击位置")
+        scrollTo("保存点击位置")
+        assertNull("修改位置不应要求先展开",find("广告截图与点击位置"))
+        assertNull(find("→"));assertNull(find("←"))
+        requireNotNull(find("广告缩放画布")).performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id)
+        instrumentation.waitForIdleSync();Thread.sleep(200)
+        val rect=android.graphics.Rect();requireNotNull(find("可调整的广告点击位置")).getBoundsInScreen(rect)
+        val canvas=android.graphics.Rect();requireNotNull(find("广告缩放画布")).getBoundsInScreen(canvas)
+        tap(canvas.exactCenterX(),canvas.exactCenterY());Thread.sleep(60);tap(canvas.exactCenterX(),canvas.exactCenterY())
+        waitUntil {find("缩放 300%")!=null}
+        screenshot("ui-ad-screenshot")
+        Thread.sleep(350)
+        tap(canvas.exactCenterX()-.15f*rect.width()*3,canvas.exactCenterY()-.05f*rect.height()*3)
+        scrollTo("距左侧 35% · 距顶部 45%")
+        screenshot("ui-edit-click-point")
+        click("保存点击位置")
+        waitUntil {repository.visualRules.value.single().userAdjusted}
+        val updated=repository.visualRules.value.single()
+        assertEquals(.35f,(updated.target.left+updated.target.right)/2,.01f)
+        assertEquals(.45f,(updated.target.top+updated.target.bottom)/2,.01f)
+        assertEquals(VisualRuleState.CANDIDATE,updated.state);assertTrue(updated.evidence.isEmpty())
+        assertEquals(TapMethod.GESTURE,updated.tapMethod);assertEquals(1L,updated.learningRevision)
+        assertEquals("旧实际点击证据不应被编辑覆盖",oldAction,repository.previews.entries.value.first {it.kind==oldAction.kind})
+        assertTrue(repository.previews.entries.value.any {it.ruleId==rule.id && it.kind==com.haibo.tiaotiao.data.PreviewKind.MANUAL})
+        assertFalse(repository.settings.value.enabled)
+        open();click("查看待处理列表");click("查看点击位置与处理进度")
+        click("确认方案正确")
+        waitUntil {repository.visualRules.value.single().active()}
+        assertTrue(repository.visualRules.value.single().manuallyConfirmed())
+        assertEquals(0,repository.visualRules.value.single().successfulSessions())
+        waitUntil {find("你已确认的跳过方案")!=null}
+        repository.removeVisual(rule.id)
+        assertFalse(savedFile.exists());assertTrue(repository.previews.entries.value.isEmpty())
+    }
+
+    @Test fun oldSampleUsesRealTaskImageAndExposesEditingOnTheDetailPage() {
+        assumeTrue("仅在独立模拟器运行",Build.HARDWARE.contains("ranchu") || Build.HARDWARE.contains("goldfish"))
+        automation=instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+        repository.updateSettings {it.copy(enabled=false,cloudEnabled=false,visionProvider=VisionProvider.JEV_OFFICIAL,visionModel="jev-latest")}
+        repository.rules.value.forEach {repository.remove(it.id)};repository.visualRules.value.forEach {repository.removeVisual(it.id)}
+        val area=Area(.85f,.05f,.95f,.09f)
+        val photographed=VisualRule(id="with-frame",packageName=context.packageName,versionCode=1,scene="b".repeat(64),sceneVersion=2,
+            target=area,targetHash="01".repeat(32),contextHash="01".repeat(32),label="skip",source="ui-fixture",createdAt=1,tapMethod=TapMethod.GESTURE)
+        val old=photographed.copy(id="without-frame",createdAt=3,contextHash="10".repeat(32))
+        repository.putVisual(photographed);repository.putVisual(old)
+        val bitmap=android.graphics.Bitmap.createBitmap(360,800,android.graphics.Bitmap.Config.ARGB_8888)
+        val jpeg=try {bitmap.eraseColor(android.graphics.Color.rgb(40,80,65));java.io.ByteArrayOutputStream().use {bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG,80,it);it.toByteArray()}}
+            finally {bitmap.recycle()}
+        runBlocking {repository.savePreview(photographed,jpeg,area,com.haibo.tiaotiao.data.PreviewKind.ACTION)}
+        open();click("查看待处理列表");click("已归集 2 个识别样本")
+        waitUntil {find("广告实际截图")!=null && find("调整点击位置")!=null}
+        assertNull("默认选择有实际截图的样本",find("这个旧样本没有原图，以下使用本任务最近广告截图作参考。"))
+        assertNotNull(find("最近实际点击"))
+        assertNull(find("点击位置模拟图：屏幕右上部"))
+        click("样本 2 · 0/2")
+        waitUntil {find("这个旧样本没有原图，以下使用本任务最近广告截图作参考。")!=null}
+        screenshot("ui-old-sample-real-image")
+        click("调整点击位置")
+        scrollTo("保存点击位置");assertNull(find("→"));click("保存点击位置")
+        waitUntil {repository.visualRules.value.first {it.id==old.id}.userAdjusted}
+        val adjusted=repository.visualRules.value.first {it.id==old.id}
+        assertEquals(photographed.contextHash,adjusted.contextHash)
+        assertEquals(photographed,repository.visualRules.value.first {it.id==photographed.id})
+        assertTrue(repository.previews.entries.value.any {it.ruleId==old.id && it.kind==com.haibo.tiaotiao.data.PreviewKind.MANUAL})
+        open();click("查看待处理列表");click("已归集 2 个识别样本")
+        waitUntil {find("手动调整后的方案位置")!=null}
+        screenshot("ui-saved-manual-point")
+    }
+
+    private fun tap(x: Float,y: Float) {
+        val at=SystemClock.uptimeMillis()
+        val down=android.view.MotionEvent.obtain(at,at,android.view.MotionEvent.ACTION_DOWN,x,y,0)
+        val up=android.view.MotionEvent.obtain(at,at+40,android.view.MotionEvent.ACTION_UP,x,y,0)
+        try {assertTrue(automation.injectInputEvent(down,true));Thread.sleep(45);assertTrue(automation.injectInputEvent(up,true))}
+        finally {down.recycle();up.recycle()}
+    }
     private fun open()=instrumentation.runOnMainSync {
         context.startActivity(Intent(context,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
     }
@@ -197,6 +356,7 @@ class RuleUiFlowTest {
         waitUntil {find(value)!=null || value.isEmpty()}
     }
     private fun find(text: String): AccessibilityNodeInfo? {
+        if(Build.VERSION.SDK_INT>=33) automation.clearCache()
         val root=automation.rootInActiveWindow ?: return null
         fun visit(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
             if(node.isVisibleToUser && (node.text?.toString()?.lines()?.contains(text)==true || node.contentDescription?.toString()?.lines()?.contains(text)==true)) return node
