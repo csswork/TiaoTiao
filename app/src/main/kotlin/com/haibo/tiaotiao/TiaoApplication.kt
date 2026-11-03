@@ -18,6 +18,8 @@ class TiaoApplication : Application() {
     val appLabels by lazy { AppLabels(this) }
     val appClassification by lazy { com.haibo.tiaotiao.data.AppClassification(this, repository) }
     val enhancedTouch by lazy {com.haibo.tiaotiao.touch.EnhancedTouch(this)}
+    val touchJournal by lazy {com.haibo.tiaotiao.touch.TouchJournal(this)}
+    val wirelessBootstrap by lazy {com.haibo.tiaotiao.touch.WirelessBootstrap(this)}
     @Volatile private var learner: com.haibo.tiaotiao.data.VisualLearner?=null
     var visualLearner: com.haibo.tiaotiao.data.VisualLearner
         get()=learner ?: com.haibo.tiaotiao.data.VisualLearner(this,repository).also {learner=it}

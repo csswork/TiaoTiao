@@ -11,15 +11,15 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /** Secrets stay out of JSON exports, backups, UI state and logs. */
-class SecretVault(context: Context) {
-    private val prefs = context.getSharedPreferences("sealed_credentials", Context.MODE_PRIVATE)
+class SecretVault(context: Context,namespace: String="sealed_credentials",private val alias: String="tiaotiao.credentials") {
+    private val prefs = context.getSharedPreferences(namespace, Context.MODE_PRIVATE)
     /** Presence checks on a hot detection path must not open/decrypt a hardware-backed key. */
     fun contains(name: String) = prefs.contains(name)
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        return (store.getKey("tiaotiao.credentials", null) as? SecretKey) ?: KeyGenerator.getInstance(
+        return (store.getKey(alias, null) as? SecretKey) ?: KeyGenerator.getInstance(
             KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
-            init(KeyGenParameterSpec.Builder("tiaotiao.credentials", KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+            init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
         }.generateKey()
     }

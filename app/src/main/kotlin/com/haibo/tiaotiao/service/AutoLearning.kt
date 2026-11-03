@@ -230,6 +230,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
                 if(refined!=null || nativeGeometry!=null) repository.log(screen.packageName,"已用当前局部文字或控件边界校准触控中心")
                 val unchanged=try {capture.targetUnchanged(frame,clickArea)} catch(c: CancellationException) {throw c} catch(_: Exception) {false}
                 if(!unchanged) {
+                    app.touchJournal.record("PRECHECK","target_changed",screen.packageName,chosen.id,details=mapOf("comparison" to capture.lastTargetCheck))
                     gestureObservation=null
                     repository.reportDetection(screen.packageName,"点击前重新校验未通过（${capture.lastTargetCheck}），取消旧坐标并重新检查")
                     return
@@ -270,7 +271,8 @@ class AutoLearning(private val service: SkipAccessibilityService,
                         if(owner!=null && owner.packageName!=snapshot.packageName) {observed.close();break}
                         if(owner==null || owner.windowId!=snapshot.windowId) {observed.close();continue}
                         val retryTarget=VisualExecution.retryTarget(chosen,screen,snapshot,actualArea,observed.signals,
-                            frame.difference(observed),observed.at-tapAt,tapCount)
+                            frame.difference(observed),observed.at-tapAt,tapCount,nativeFallback=
+                                service.touchExecutions.lastOrNull {it.ruleId==chosen.id}?.backend=="原生控件" && app.enhancedTouch.ownedReady)
                         val retryUnchanged=retryTarget!=null && try {capture.targetUnchanged(observed,retryTarget)}
                             catch(c: CancellationException) {throw c} catch(_: Exception) {false}
                         if(retryTarget!=null && retryUnchanged && repository.visualRules.value.any {it.id==chosen.id && it.behavior()==chosen.behavior() && !VisualPolicy.userPaused(it)}) {
@@ -296,6 +298,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     }
                     pendingRule=null
                     if (afterFrames.size<2) {
+                        app.touchJournal.record("RESULT","no_result_frames",screen.packageName,chosen.id)
                         // Missing screenshots say nothing about whether the target itself works.
                         repository.reportDetection(screen.packageName,"点击后未取得两帧有效截图，本次不计为验证成功；保留方案")
                         service.checkStatus(screen.packageName,"结果尚不明确，下次再检查",true)
@@ -312,6 +315,10 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     // corroborates it and may arrive later because OCR work takes time.
                     val early=remaining>=2000 && after1.at-frame.at<remaining-300
                     val basis=if (frame.signals.countdown!=null) "countdown" else if (baseline>0) "observed_baseline" else "unknown"
+                    app.touchJournal.record("RESULT",if(after2.signals.skips.any {it.near(clickArea)}) "ad_still_visible" else "result_unknown",
+                        screen.packageName,chosen.id,requestId=service.touchExecutions.lastOrNull {it.ruleId==chosen.id}?.requestId.orEmpty(),details=mapOf(
+                            "changed" to changed.toString(),"advertisement" to after2.signals.advertisement.toString(),"home" to after2.signals.home.toString(),
+                            "early" to early.toString(),"timingBasis" to basis,"firstFrameMs" to (after1.at-frame.at).toString()))
                     repository.log(screen.packageName,"时序检查：$basis，保守剩余 $remaining ms，首个结果 ${after1.at-frame.at} ms")
                     if (chosen.source=="bundled-ocr-demo") {
                         repository.putVisual(VisualPolicy.record(chosen,session,early,changed,true,System.currentTimeMillis(),basis))
@@ -319,6 +326,8 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     } else if (chosen.active() && changed && (early || chosen.manuallyConfirmed()) && !after1.signals.advertisement && !after2.signals.advertisement &&
                         ((after1.signals.home && after2.signals.home) || VisualPolicy.matchesHome(chosen,beforeHash,firstHash,secondHash) ||
                         (chosen.homeScene.isNotEmpty() && after1.screen.fingerprint()==chosen.homeScene && after2.screen.fingerprint()==chosen.homeScene))) {
+                        app.touchJournal.record("RESULT",if(early) "ad_closed_early" else "result_unknown",screen.packageName,chosen.id,
+                            requestId=service.touchExecutions.lastOrNull {it.ruleId==chosen.id}?.requestId.orEmpty())
                         repository.reportDetection(screen.packageName,if(early) "智能规则本地复用及提前关闭检查通过，未请求云端模型"
                             else "已观察到广告结束，缺少提前关闭的时序证据；保留人工确认，不将自然结束记为点击成功")
                         service.checkStatus(screen.packageName,"已完成跳过检查",true)

@@ -3,7 +3,7 @@ package com.haibo.tiaotiao.touch
 import android.os.Process
 import android.os.SystemClock
 
-/** ADB-only probe of the same bounded UserService used by Shizuku. No component is exported. */
+/** ADB-only probe of the bounded system service. No component is exported. */
 object TouchShellProbe {
     @JvmStatic fun main(args: Array<String>) {
         require(Process.myUid()==2000)

@@ -11,8 +11,8 @@ object VisualExecution {
     }
     /** A second gesture requires a fresh, unchanged advertisement and the same observed control. */
     fun retryTarget(rule: VisualRule,before: ScreenSnapshot,after: ScreenSnapshot,area: Area,
-        signals: VisualSignals,difference: Double,elapsed: Long,attempts: Int): Area? {
-        if(rule.tapMethod!=TapMethod.GESTURE || attempts!=1 || elapsed !in 900..2500 ||
+        signals: VisualSignals,difference: Double,elapsed: Long,attempts: Int,nativeFallback: Boolean=false): Area? {
+        if((rule.tapMethod!=TapMethod.GESTURE && !(rule.tapMethod==TapMethod.ACCESSIBILITY && nativeFallback)) || attempts!=1 || elapsed !in 900..2500 ||
             !difference.isFinite() || difference>.02 || signals.home || !signals.advertisement ||
             before.packageName!=after.packageName || before.versionCode!=after.versionCode || before.windowId!=after.windowId ||
             before.width!=after.width || before.height!=after.height) return null

@@ -1,47 +1,73 @@
 package com.haibo.tiaotiao.touch
 
+import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Binder
+import android.os.Bundle
 import android.os.Process
 import android.os.SystemClock
 import androidx.annotation.Keep
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.FutureTask
 
-/** Runs under Shizuku's shell identity. No arbitrary command, file, or coordinate script API. */
+/** Runs under the locally authorized shell identity. No arbitrary command or file API. */
 @Keep
-class SystemTouchService : ISystemTouch.Stub() {
+class SystemTouchService @JvmOverloads constructor(initialOwnerUid: Int?=null,private val context: Context?=null) : ISystemTouch.Stub() {
     companion object {
         const val PRESS_MS=120L
         internal fun command(x: Int,y: Int)=listOf("/system/bin/input","touchscreen","swipe",
             x.toString(),y.toString(),x.toString(),y.toString(),PRESS_MS.toString())
     }
-    private var ownerUid: Int?=null
+    private var ownerUid: Int?=initialOwnerUid
     private var lastInput=0L
+    private var sequence=0L
     private val direct by lazy {DirectSystemTouch.resolve()}
-    @Synchronized override fun tap(expectedPackage: String,x: Int,y: Int,width: Int,height: Int,deadlineUptimeMs: Long): Int {
-        val caller=Binder.getCallingUid()
-        if(ownerUid!=null && ownerUid!=caller) return -1
-        if(Process.myUid()!=2000 && Process.myUid()!=0) return -1
+    private fun authenticate(): Boolean=Process.myUid() in setOf(0,2000) && (ownerUid==null || ownerUid==Binder.getCallingUid())
+    private fun permission(): String=try {
+        if(context==null) "unknown" else if(context.checkPermission("android.permission.INJECT_EVENTS",Process.myPid(),Process.myUid())==PackageManager.PERMISSION_GRANTED) "granted" else "denied"
+    } catch(_: Exception) {"unknown"}
+    @Synchronized override fun status(): Bundle {
+        check(authenticate()) {"Unauthorized touch client"}
+        return Bundle().apply {
+            putInt("protocol",2);putInt("uid",Process.myUid());putInt("pid",Process.myPid())
+            putLong("uptimeMs",SystemClock.uptimeMillis());putString("permission",permission());putBoolean("directAvailable",direct!=null)
+        }
+    }
+    @Synchronized override fun tap(expectedPackage: String,x: Int,y: Int,width: Int,height: Int,deadlineUptimeMs: Long): Int =
+        tapDetailed(expectedPackage,x,y,width,height,deadlineUptimeMs).getInt("code")
+    @Synchronized override fun tapDetailed(expectedPackage: String,x: Int,y: Int,width: Int,height: Int,deadlineUptimeMs: Long): Bundle {
+        val started=SystemClock.uptimeMillis()
+        val id="${Process.myPid()}-${++sequence}"
+        fun reply(code: Int,reason: String)=Bundle().apply {
+            putInt("code",code);putString("reason",reason);putString("requestId",id)
+            putInt("uid",Process.myUid());putInt("pid",Process.myPid());putInt("displayId",0)
+            putLong("elapsedMs",SystemClock.uptimeMillis()-started)
+        }
+        if(!authenticate()) return reply(-1,"unauthorized_caller")
         if(!expectedPackage.matches(Regex("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+")) ||
-            width !in 1..16384 || height !in 1..16384 || x !in 0 until width || y !in 0 until height) return -1
-        val now=SystemClock.uptimeMillis()
-        if(deadlineUptimeMs<now || deadlineUptimeMs-now>1000 || now-lastInput<400) return -1
-        ownerUid=caller
-        return try {
+            width !in 1..16384 || height !in 1..16384 || x !in 0 until width || y !in 0 until height) return reply(-1,"invalid_coordinates")
+        if(deadlineUptimeMs<started || deadlineUptimeMs-started>1000) return reply(-1,"request_expired")
+        if(started-lastInput<400) return reply(-1,"rate_limited")
+        ownerUid=Binder.getCallingUid()
+        val identity=Binder.clearCallingIdentity()
+        try {
+            if(permission()=="denied") return reply(-1,"inject_permission_denied")
             // Recheck foreground in the privileged process too, after the Binder handoff.
             val focus=ProcessBuilder("/system/bin/dumpsys","window","displays").redirectErrorStream(true).start()
             val read=FutureTask {focus.inputStream.bufferedReader().use {it.readText()}}
             Thread(read,"touch-foreground").apply {isDaemon=true;start()}
             val output=try {read.get(450,TimeUnit.MILLISECONDS)}
-                catch(_: Exception) {return -1}
+                catch(_: Exception) {return reply(-1,"foreground_check_timeout")}
                 finally {if(focus.isAlive) focus.destroyForcibly();read.cancel(true)}
-            if(!SystemTouchGuard.allows(expectedPackage,x,y,width,height,output) || SystemClock.uptimeMillis()>deadlineUptimeMs) return -1
+            SystemTouchGuard.rejection(expectedPackage,x,y,width,height,output)?.let {return reply(-1,it)}
+            if(SystemClock.uptimeMillis()>deadlineUptimeMs) return reply(-1,"request_expired_after_check")
             lastInput=SystemClock.uptimeMillis()
-            direct?.let {return if(it.tap(x,y,PRESS_MS)) 1 else 0}
+            direct?.let {return reply(if(it.tap(x,y,PRESS_MS)) 1 else 0,it.lastReason)}
             val process=ProcessBuilder(command(x,y)).redirectErrorStream(true).start()
-            if(!process.waitFor(1500,TimeUnit.MILLISECONDS)) {process.destroyForcibly();0}
-            else if(process.exitValue()==0) 2 else 0
-        } catch(_: Exception) {0}
+            return if(!process.waitFor(1500,TimeUnit.MILLISECONDS)) {process.destroyForcibly();reply(0,"command_timeout")}
+                else if(process.exitValue()==0) reply(2,"command_completed") else reply(0,"command_exit_${process.exitValue()}")
+        } catch(error: Exception) {return reply(0,"service_exception_${error.javaClass.simpleName}")}
+        finally {Binder.restoreCallingIdentity(identity)}
     }
-    override fun destroy() {kotlin.system.exitProcess(0)}
+    @Synchronized override fun destroy() {check(authenticate());kotlin.system.exitProcess(0)}
 }

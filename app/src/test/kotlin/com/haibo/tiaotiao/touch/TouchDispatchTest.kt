@@ -7,7 +7,7 @@ import org.junit.Test
 class TouchDispatchTest {
     @Test fun `system success never also dispatches an accessibility tap`()=runBlocking {
         var fallback=0
-        assertEquals(TouchResult("Shizuku 系统触控",true),routeTouch(true,{TouchDispatch.COMPLETED},{fallback++;true}))
+        assertEquals(TouchResult("内置系统触控",true),routeTouch(true,{TouchDispatch.COMPLETED},{fallback++;true}))
         assertEquals(0,fallback)
     }
     @Test fun `uncertain system failure cannot send a second backend`()=runBlocking {

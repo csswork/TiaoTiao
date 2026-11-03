@@ -471,7 +471,7 @@ class MainActivity : ComponentActivity() {
                 Text("普通规则保留筛选后的节点样本；智能学习另有少量遮挡图片缓存，识别成功或过期后清理。", style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = { task { repository.clearSamples(); (application as TiaoApplication).visualLearner.clearPending(); "已清空本地节点与视觉学习样本" } }, enabled = !busy) { Text("清空样本") }
             } }
-            item { Text("TiaoTiao 0.3.10 · 智能视觉试用需要 Android 11 及以上\n服务被系统关闭后，需在系统设置重新开启。", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
+            item { Text("TiaoTiao 0.3.13 · 智能视觉试用需要 Android 11 及以上\n服务被系统关闭后，需在系统设置重新开启。", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
         }
     }
 }

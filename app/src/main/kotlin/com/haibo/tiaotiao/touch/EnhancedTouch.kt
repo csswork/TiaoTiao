@@ -1,9 +1,7 @@
 package com.haibo.tiaotiao.touch
 
-import android.content.ComponentName
 import android.content.Context
-import android.content.ServiceConnection
-import android.content.pm.PackageManager
+import android.os.Binder
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -11,88 +9,97 @@ import android.os.SystemClock
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import rikka.shizuku.Shizuku
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import com.haibo.tiaotiao.TiaoApplication
 
-enum class TouchConnection(val text: String) {
-    MISSING("尚未安装 Shizuku"), STOPPED("请启动 Shizuku"), NEEDS_PERMISSION("等待 Shizuku 授权"),
-    CONNECTING("正在连接增强触控"), READY("增强触控已就绪"), FAILED("增强触控连接失败，可重试")
-}
+enum class TouchConnection { STOPPED, READY, FAILED }
+data class TouchHealth(val checkedAt: Long=0,val available: Boolean=false,val uid: Int=-1,val pid: Int=-1,val permission: String="unknown",val reason: String="not_checked")
+data class TouchAttempt(val requestId: String="",val reason: String="",val code: Int=0,val elapsedMs: Long=0,val at: Long=0)
 
-class EnhancedTouch(private val context: Context) {
-    private val handler=Handler(Looper.getMainLooper())
+/** Single-app Binder client; the only bootstrap is TiaoTiao's locally paired shell starter. */
+class EnhancedTouch(context: Context) {
+    private val journal=(context.applicationContext as TiaoApplication).touchJournal
     private val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main.immediate)
+    private val probeLock=Mutex()
+    private val _health=MutableStateFlow(TouchHealth())
+    val health=_health.asStateFlow()
+    private val _attempt=MutableStateFlow(TouchAttempt())
+    val attempt=_attempt.asStateFlow()
+    val clientLife=Binder()
+    private val handler=Handler(Looper.getMainLooper())
     private val _state=MutableStateFlow(TouchConnection.STOPPED)
     val state=_state.asStateFlow()
     @Volatile private var service: ISystemTouch?=null
-    private var binding=false
-    private var bindingTimeout: Job?=null
     @Volatile var lastEngine=""
         private set
-    private val args=Shizuku.UserServiceArgs(ComponentName(context.packageName,SystemTouchService::class.java.name))
-        .tag("tiaotiao-system-touch").daemon(false).processNameSuffix("touch").version(2)
-    private val connection=object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?,binder: IBinder?) {
-            bindingTimeout?.cancel();binding=false
-            service=binder?.takeIf {it.pingBinder()}?.let(ISystemTouch.Stub::asInterface)
-            _state.value=if(service!=null) TouchConnection.READY else TouchConnection.FAILED
-        }
-        override fun onServiceDisconnected(name: ComponentName?) {
-            service=null;binding=false;_state.value=TouchConnection.STOPPED
-        }
-    }
-    private val received=Shizuku.OnBinderReceivedListener {handler.post {refresh()}}
-    private val dead=Shizuku.OnBinderDeadListener {handler.post {
-        service=null;binding=false;bindingTimeout?.cancel();_state.value=TouchConnection.STOPPED
-    }}
-    private val permission=Shizuku.OnRequestPermissionResultListener {code,_ ->if(code==7341) handler.post {refresh()}}
+    val ownedReady get()=service?.asBinder()?.pingBinder()==true
     init {
-        Shizuku.addBinderReceivedListenerSticky(received)
-        Shizuku.addBinderDeadListener(dead)
-        Shizuku.addRequestPermissionResultListener(permission)
-        refresh()
+        scope.launch {journal.network.drop(1).collect {probe("network_change")}}
+        scope.launch {while(isActive) {delay(30_000);if(ownedReady) probe("heartbeat")}}
     }
-    fun refresh() {
-        if(!Shizuku.pingBinder()) {
-            service=null
-            _state.value=if(runCatching {context.packageManager.getPackageInfo("moe.shizuku.privileged.api",0)}.isSuccess)
-                TouchConnection.STOPPED else TouchConnection.MISSING
-            return
-        }
-        if(runCatching {Shizuku.checkSelfPermission()==PackageManager.PERMISSION_GRANTED}.getOrDefault(false).not()) {
-            service=null;_state.value=TouchConnection.NEEDS_PERMISSION;return
-        }
-        if(service?.asBinder()?.pingBinder()==true) {_state.value=TouchConnection.READY;return}
-        if(binding) return
-        binding=true;_state.value=TouchConnection.CONNECTING
-        try {
-            Shizuku.bindUserService(args,connection)
-            bindingTimeout=scope.launch {
-                delay(5000)
-                if(binding) {binding=false;_state.value=TouchConnection.FAILED}
+    fun attachOwned(binder: IBinder) {
+        service=ISystemTouch.Stub.asInterface(binder)
+        binder.linkToDeath({handler.post {
+            if(service?.asBinder()==binder) {
+                service=null;_state.value=TouchConnection.STOPPED;_health.value=TouchHealth(checkedAt=System.currentTimeMillis(),reason="binder_died")
+                journal.record("SERVICE","binder_died")
             }
-        } catch(_: Exception) {binding=false;_state.value=TouchConnection.FAILED}
+        }},0)
+        handler.post {refresh();journal.record("SERVICE","attached");scope.launch {probe("attached")}}
     }
-    fun authorize() {
-        try {
-            if(!Shizuku.pingBinder()) {refresh();return}
-            if(Shizuku.checkSelfPermission()==PackageManager.PERMISSION_GRANTED) refresh()
-            else Shizuku.requestPermission(7341)
-        } catch(_: Exception) {_state.value=TouchConnection.FAILED}
+    fun refresh() {_state.value=if(ownedReady) TouchConnection.READY else TouchConnection.STOPPED}
+    suspend fun probe(trigger: String="manual")=probeLock.withLock {
+        val target=service
+        val old=_health.value
+        val value=try {
+            if(target==null || !target.asBinder().pingBinder()) TouchHealth(checkedAt=System.currentTimeMillis(),reason="service_unavailable")
+            else withContext(Dispatchers.IO) {
+                val status=target.status()
+                val uid=status.getInt("uid",-1);val permission=status.getString("permission","unknown")
+                TouchHealth(System.currentTimeMillis(),status.getInt("protocol")==2 && uid in setOf(0,2000) && permission!="denied",
+                    uid,status.getInt("pid",-1),permission,if(permission=="denied") "inject_permission_denied" else "service_responding")
+            }
+        } catch(error: Exception) {TouchHealth(checkedAt=System.currentTimeMillis(),reason="probe_${error.javaClass.simpleName}")}
+        if(service!==target) return@withLock
+        _health.value=value
+        if(target!=null) _state.value=if(value.available) TouchConnection.READY else TouchConnection.FAILED
+        if(trigger!="heartbeat" || old.copy(checkedAt=0)!=value.copy(checkedAt=0)) journal.record("HEALTH",value.reason,details=mapOf(
+            "trigger" to trigger,"uid" to value.uid.toString(),"pid" to value.pid.toString(),"permission" to value.permission,"available" to value.available.toString()))
     }
-    /** null service is the sole no-input fallback case. Once called, never send a second backend. */
+    suspend fun stopOwned() {
+        val previous=service;service=null
+        refresh()
+        _health.value=TouchHealth(checkedAt=System.currentTimeMillis(),reason="stopped_by_user")
+        journal.record("SERVICE","stopped_by_user")
+        withContext(NonCancellable+Dispatchers.IO) {runCatching {previous?.destroy()}}
+    }
     suspend fun tap(pkg: String,x: Int,y: Int,width: Int,height: Int): TouchDispatch {
-        val target=service ?: return TouchDispatch.UNAVAILABLE
-        if(!Shizuku.pingBinder() || runCatching {Shizuku.checkSelfPermission()!=PackageManager.PERMISSION_GRANTED}.getOrDefault(true)) {
-            handler.post {refresh()};return TouchDispatch.UNAVAILABLE
-        }
+        val target=service?.takeIf {it.asBinder().pingBinder()} ?: run {journal.record("ACTION","service_unavailable",pkg);return TouchDispatch.UNAVAILABLE}
         val deadline=SystemClock.uptimeMillis()+600
         return withContext(NonCancellable+Dispatchers.IO) {
             try {
-                val result=target.tap(pkg,x,y,width,height,deadline)
+                val report=target.tapDetailed(pkg,x,y,width,height,deadline)
+                val result=report.getInt("code")
+                val reason=report.getString("reason","unknown")
+                val requestId=report.getString("requestId","")
+                _attempt.value=TouchAttempt(requestId,reason,result,report.getLong("elapsedMs"),System.currentTimeMillis())
+                journal.record("ACTION",reason,pkg,requestId=requestId,details=mapOf("backend" to "system","code" to result.toString(),
+                    "x" to x.toString(),"y" to y.toString(),"width" to width.toString(),"height" to height.toString(),
+                    "pressMs" to SystemTouchService.PRESS_MS.toString(),"elapsedMs" to report.getLong("elapsedMs").toString(),
+                    "uid" to report.getInt("uid").toString(),"pid" to report.getInt("pid").toString()))
                 lastEngine=when(result) {1 -> "系统输入接口";2 -> "兼容系统命令";else -> "未完成"}
                 if(result in 1..2) TouchDispatch.COMPLETED else TouchDispatch.FAILED
+            } catch(error: Exception) {
+                val reason="rpc_${error.javaClass.simpleName}"
+                _attempt.value=TouchAttempt(reason=reason,at=System.currentTimeMillis())
+                journal.record("ACTION",reason,pkg,details=mapOf("backend" to "system","x" to x.toString(),"y" to y.toString()))
+                lastEngine="未完成"
+                handler.post {if(service==target) {service=null;_state.value=TouchConnection.FAILED}}
+                TouchDispatch.FAILED
             }
-            catch(_: Exception) {handler.post {service=null;binding=false;_state.value=TouchConnection.FAILED};TouchDispatch.FAILED}
         }
     }
 }

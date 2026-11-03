@@ -284,7 +284,7 @@ class UniversalLearningFlowTest {
             assertTrue("第一次不确定后应在同一会话重新识别",uncertainJevImages.get()>=2)
             assertTrue(directJevImages.get()>=3)
             assertEquals("每个启动只显示一次提示，阶段变化不再弹出",bubbleShows+1,SkipAccessibilityService.instance!!.diagnosticBubbleShows)
-            val directRule=repository.visualRules.value.first {it.source=="JEV_OFFICIAL:jev-latest"}
+            val directRule=repository.visualRules.value.first {it.source=="JEV_OFFICIAL:jev-latest" && it.evidence.isNotEmpty()}
             assertTrue(repository.previews.entries.value.any {it.ruleId==directRule.id && it.kind==com.haibo.tiaotiao.data.PreviewKind.RECOGNITION})
             assertTrue(repository.previews.entries.value.any {it.ruleId==directRule.id && it.kind==com.haibo.tiaotiao.data.PreviewKind.ACTION})
             leave()

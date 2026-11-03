@@ -37,9 +37,11 @@ class SkipAccessibilityService : AccessibilityService() {
         val instance: SkipAccessibilityService? get() = serviceRef.get()
     }
     private val repository get() = (application as TiaoApplication).repository
+    private val touchJournal get()=(application as TiaoApplication).touchJournal
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val gate = SessionGate()
     private val checkBubble by lazy {CheckBubble(this,scope)}
+    private var pairingAssistant: com.haibo.tiaotiao.touch.WirelessPairingAssistant?=null
     private var bubbleSession: Pair<String,Long>?=null
     internal val diagnosticBubbleVisible get()=checkBubble.visible
     internal val diagnosticBubbleShows get()=checkBubble.shows
@@ -115,9 +117,13 @@ class SkipAccessibilityService : AccessibilityService() {
     }
 
     override fun onServiceConnected() {
+        if(applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE!=0)
+            diagnosticHeldPackage=getSharedPreferences("touch_diagnostic_controls",MODE_PRIVATE).getString("heldPackage",null)
         serviceRef = WeakReference(this)
         repository.connected.value = true
         repository.log("", "无障碍服务已连接")
+        pairingAssistant?.close()
+        pairingAssistant=com.haibo.tiaotiao.touch.WirelessPairingAssistant(this,scope,(application as TiaoApplication).wirelessBootstrap)
         (application as TiaoApplication).visualLearner.resume()
         if(android.os.Build.VERSION.SDK_INT>=30) learning().warmUp()
         scope.launch {
@@ -136,6 +142,11 @@ class SkipAccessibilityService : AccessibilityService() {
     }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null || resettingResults || !repository.settings.value.enabled) return
+        if((application as TiaoApplication).wirelessBootstrap.state.value.assisting) {
+            stopDashboardScan()
+            lastReadState="本机配对辅助期间暂停广告识别"
+            return
+        }
         val eventPackage = event.packageName?.toString().orEmpty()
         if(dashboardVisible()) {
             ignoredDashboardEvents++
@@ -184,6 +195,7 @@ class SkipAccessibilityService : AccessibilityService() {
     }
     private fun scheduleScan() {
         if(resettingResults) return
+        if((application as TiaoApplication).wirelessBootstrap.state.value.assisting) return
         if(dashboardVisible() && targetEventPackage==null) return
         if (scanJob?.isActive == true) return
         scanJob = scope.launch {
@@ -502,51 +514,79 @@ class SkipAccessibilityService : AccessibilityService() {
     private suspend fun smartTap(generation: Long,screen: ScreenSnapshot,area: Area,rule: VisualRule,retry: Boolean=false): Boolean =
         touchLane.withLock {smartTapLocked(generation,screen,area,rule,retry)}
     private suspend fun smartTapLocked(generation: Long, screen: ScreenSnapshot, area: Area, rule: VisualRule,retry: Boolean): Boolean {
+        fun reject(reason: String,details: Map<String,String> = emptyMap()): Boolean {
+            touchJournal.record("PRECHECK",reason,screen.packageName,rule.id,details=details)
+            repository.log(screen.packageName,"点击前取消：${com.haibo.tiaotiao.touch.touchReason(reason)}；方案=${rule.id.take(8)}")
+            return false
+        }
         val now=SystemClock.elapsedRealtime()
         if (!repository.settings.value.enabled || gate.generation != generation ||
-            !(if(retry) gate.canRetry(screen.packageName,now) else gate.isOpen(screen.packageName,now))) return false
-        val fresh=visualWindow() ?: return false
+            !(if(retry) gate.canRetry(screen.packageName,now) else gate.isOpen(screen.packageName,now))) return reject("session_expired")
+        if(diagnosticHeldPackage==screen.packageName) return reject("diagnostic_hold")
+        val fresh=visualWindow() ?: return reject("window_unavailable")
         if(fresh.windowId!=screen.windowId || AdRecognition.scene(fresh)!=AdRecognition.scene(screen) || !area.valid() ||
-            area.right-area.left>.4f || area.bottom-area.top>.18f) return false
-        if(!AdRecognition.eligible(screen.packageName,repository.settings.value.packages,packageName,repository.settings.value.automaticLearning) && !visualDemo(screen)) return false
+            area.right-area.left>.4f || area.bottom-area.top>.18f) return reject("scene_changed",mapOf("expectedWindow" to screen.windowId.toString(),"actualWindow" to fresh.windowId.toString()))
+        if(!AdRecognition.eligible(screen.packageName,repository.settings.value.packages,packageName,repository.settings.value.automaticLearning) && !visualDemo(screen)) return reject("app_not_selected")
         val x=(area.left+area.right)/2;val y=(area.top+area.bottom)/2
         val pixelX=(x*screen.width).toInt();val pixelY=(y*screen.height).toInt()
         val bounds=android.graphics.Rect()
-        selectedWindow(windows)?.takeIf {it.id==screen.windowId}?.getBoundsInScreen(bounds) ?: return false
-        if(!bounds.contains(pixelX,pixelY)) return false
+        selectedWindow(windows)?.takeIf {it.id==screen.windowId}?.getBoundsInScreen(bounds) ?: return reject("window_changed")
+        if(!bounds.contains(pixelX,pixelY)) return reject("point_outside_window")
         val enhanced=(application as TiaoApplication).enhancedTouch
         val useEnhanced=repository.settings.value.enhancedTouch && enhanced.state.value==com.haibo.tiaotiao.touch.TouchConnection.READY
         val recentNodes=nodeObservation?.takeIf {it.screen.packageName==fresh.packageName && it.screen.windowId==fresh.windowId &&
             SystemClock.elapsedRealtime()-nodeSnapshotAt<1500}
         val nativeTarget=VisualPolicy.nativeTarget(rule,if(fresh.complete) fresh else recentNodes?.screen ?: fresh,area)
-        if(rule.tapMethod==TapMethod.ACCESSIBILITY && (nativeTarget==null ||
-            x !in nativeTarget.bounds.left..nativeTarget.bounds.right || y !in nativeTarget.bounds.top..nativeTarget.bounds.bottom)) return false
-        val node=if(useEnhanced) null else nativeTarget
+        if(rule.tapMethod==TapMethod.ACCESSIBILITY && nativeTarget==null) return reject("native_target_missing",mapOf(
+            "freshComplete" to fresh.complete.toString(),"nodeAgeMs" to (now-nodeSnapshotAt).toString(),"recentNodes" to (recentNodes!=null).toString()))
+        if(rule.tapMethod==TapMethod.ACCESSIBILITY && nativeTarget!=null &&
+            (x !in nativeTarget.bounds.left..nativeTarget.bounds.right || y !in nativeTarget.bounds.top..nativeTarget.bounds.bottom)) return reject("native_point_outside")
+        // Preserve a rule's native close action. Enhanced coordinates are a guarded fallback,
+        // rather than replacing every accessible close control with a synthetic touch.
+        if(retry && rule.tapMethod==TapMethod.ACCESSIBILITY && !useEnhanced) return reject("native_fallback_unavailable")
+        val node=if(rule.tapMethod==TapMethod.ACCESSIBILITY && !retry) nativeTarget else if(useEnhanced) null else nativeTarget
         val handle=node?.let {recentNodes?.handles?.get(it.path)}?.let {
             @Suppress("DEPRECATION") AccessibilityNodeInfo.obtain(it)
         }
         if(handle!=null) {
-            gate.dispatched()
-            val accepted=try {withContext(Dispatchers.IO) {handle.performAction(AccessibilityNodeInfo.ACTION_CLICK)}}
+            val started=SystemClock.elapsedRealtime()
+            var valid=false
+            val accepted=try {withContext(Dispatchers.IO) {
+                val currentBounds=android.graphics.Rect()
+                valid=handle.refresh() && handle.packageName?.toString()==screen.packageName && handle.windowId==screen.windowId &&
+                    handle.viewIdResourceName.orEmpty()==nativeTarget?.resourceId.orEmpty() && handle.className?.toString()==nativeTarget?.className
+                if(valid) {handle.getBoundsInScreen(currentBounds);valid=handle.isVisibleToUser && currentBounds.contains(pixelX,pixelY)}
+                if(!valid) false else {gate.dispatched();handle.performAction(AccessibilityNodeInfo.ACTION_CLICK)}
+            }}
                 finally {@Suppress("DEPRECATION") handle.recycle()}
+            if(!valid) return reject("native_handle_changed")
+            val requestId="native-${android.os.Process.myPid()}-$started"
+            touchExecutions=(touchExecutions+com.haibo.tiaotiao.touch.TouchExecution(rule.id,"原生控件",pixelX,pixelY,
+                screen.width,screen.height,0,started,accepted,"ACTION_CLICK",requestId,if(accepted) "native_accepted" else "native_rejected",SystemClock.elapsedRealtime()-started)).takeLast(8)
+            touchJournal.record("ACTION",if(accepted) "native_accepted" else "native_rejected",screen.packageName,rule.id,
+                requestId=requestId,details=mapOf("backend" to "native","x" to pixelX.toString(),"y" to pixelY.toString()))
             repository.reportDetection(screen.packageName,if(accepted) "已对 Jev 选中的原生控件发起关闭，等待结果检查" else "原生控件未接受关闭，已停止本轮")
             return accepted
         }
         if(rule.tapMethod==TapMethod.ACCESSIBILITY && !useEnhanced) {
             repository.reportDetection(screen.packageName,"Jev 目标控件已变化，未替换成坐标盲点")
-            return false
+            return reject("native_handle_unavailable")
         }
-        if(AdRecognition.candidates(fresh).count {x in it.bounds.left..it.bounds.right && y in it.bounds.top..it.bounds.bottom}>1) return false
+        if(AdRecognition.candidates(fresh).count {x in it.bounds.left..it.bounds.right && y in it.bounds.top..it.bounds.bottom}>1) return reject("ambiguous_target")
         gate.dispatched()
         val touchStarted=SystemClock.elapsedRealtime()
         val result=routeTouch(useEnhanced,
             system={enhanced.tap(screen.packageName,pixelX,pixelY,screen.width,screen.height)},
             accessibility={dispatchTouch(pixelX,pixelY)})
-        val pressMs=if(result.backend=="Shizuku 系统触控") com.haibo.tiaotiao.touch.SystemTouchService.PRESS_MS else GESTURE_PRESS_MS
+        val pressMs=if(result.backend=="内置系统触控") com.haibo.tiaotiao.touch.SystemTouchService.PRESS_MS else GESTURE_PRESS_MS
+        val report=enhanced.attempt.value.takeIf {result.backend=="内置系统触控"}
         touchExecutions=(touchExecutions+com.haibo.tiaotiao.touch.TouchExecution(rule.id,result.backend,pixelX,pixelY,
-            screen.width,screen.height,pressMs,touchStarted,result.completed,if(result.backend=="Shizuku 系统触控") enhanced.lastEngine else "dispatchGesture")).takeLast(8)
-        repository.reportDetection(screen.packageName,"${result.backend}${if(result.backend=="Shizuku 系统触控") "（${enhanced.lastEngine}）" else ""}：屏幕 ${screen.width}×${screen.height}，实际触点 $pixelX,$pixelY，短点 $pressMs ms，"+
-            if(result.completed) "系统执行完成，等待检查广告是否提前关闭" else "执行失败或状态不明确，本轮不改用其他通道补点")
+            screen.width,screen.height,pressMs,touchStarted,result.completed,if(result.backend=="内置系统触控") enhanced.lastEngine else "dispatchGesture",
+            report?.requestId.orEmpty(),report?.reason.orEmpty(),report?.elapsedMs ?: 0)).takeLast(8)
+        touchJournal.record("DISPATCH",report?.reason ?: if(result.completed) "gesture_completed" else "gesture_failed",screen.packageName,rule.id,report?.requestId.orEmpty(),mapOf(
+            "backend" to result.backend,"ruleMethod" to rule.tapMethod.name,"completed" to result.completed.toString(),"x" to pixelX.toString(),"y" to pixelY.toString()))
+        repository.reportDetection(screen.packageName,"${result.backend}${if(result.backend=="内置系统触控") "（${enhanced.lastEngine}）" else ""}：屏幕 ${screen.width}×${screen.height}，实际触点 $pixelX,$pixelY，短点 $pressMs ms，"+
+            if(result.completed) "系统执行完成，等待检查广告是否提前关闭" else "执行未完成：${com.haibo.tiaotiao.touch.touchReason(report?.reason ?: "gesture_failed")}；本轮不改用其他通道补点")
         return result.completed
     }
     private suspend fun dispatchTouch(x: Int,y: Int): Boolean = withContext(NonCancellable) {
@@ -654,10 +694,19 @@ class SkipAccessibilityService : AccessibilityService() {
             args.firstOrNull {it.startsWith("hold-actions=")}?.substringAfter('=')?.let {pkg ->
                 if(pkg in repository.settings.value.packages) {
                     diagnosticHeldPackage=pkg
+                    getSharedPreferences("touch_diagnostic_controls",MODE_PRIVATE).edit().putString("heldPackage",pkg).apply()
                     writer.println("Temporarily holding automatic actions for $pkg; configuration is unchanged")
                 }
             }
-            if("release-actions" in args) {diagnosticHeldPackage=null;writer.println("Automatic actions resumed")}
+            if("release-actions" in args) {diagnosticHeldPackage=null;getSharedPreferences("touch_diagnostic_controls",MODE_PRIVATE).edit().remove("heldPackage").apply();writer.println("Automatic actions resumed")}
+            if("start-owned-touch" in args && repository.settings.value.enhancedTouch &&
+                (application as TiaoApplication).wirelessBootstrap.state.value.paired) {
+                scope.launch {
+                    val bootstrap=(application as TiaoApplication).wirelessBootstrap
+                    bootstrap.beginDiscovery();bootstrap.startPaired()
+                }
+                writer.println("Requested app-local startup using its saved pairing identity")
+            }
         }
         if("test-vision" in args && applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE!=0) {
             scope.launch {com.haibo.tiaotiao.network.testVisionConnection(repository)}
@@ -682,10 +731,22 @@ class SkipAccessibilityService : AccessibilityService() {
         writer.println("rules=${repository.rules.value.size}, visualRules=${repository.visualRules.value.size}, samples=${repository.sampleCount.value}, resetting=$resettingResults")
         writer.println("checkBubble=${checkBubble.visible}")
         writer.println("enhancedTouch=${repository.settings.value.enhancedTouch}, channel=${(application as TiaoApplication).enhancedTouch.state.value}")
+        writer.println("ownedTouch=${(application as TiaoApplication).enhancedTouch.ownedReady}")
+        writer.println("touchHealth=${(application as TiaoApplication).enhancedTouch.health.value}")
+        writer.println("touchNetwork=${touchJournal.snapshot}, held=$diagnosticHeldPackage")
+        touchExecutions.takeLast(4).forEach {writer.println("touchExecution=$it")}
+        if("probe-touch" in args) scope.launch {(application as TiaoApplication).enhancedTouch.probe("diagnostic")}
+        if("flush-touch-log" in args) scope.launch {touchJournal.flush()}
+        (application as TiaoApplication).wirelessBootstrap.state.value.let {
+            writer.println("wirelessSetup=${it.phase}, paired=${it.paired}, pairingPort=${it.pairingPort}, connectPort=${it.connectPort}, assisting=${it.assisting}")
+        }
+        pairingAssistant?.let {writer.println("pairingDialogs=${it.inspectedDialogs}, autoDetected=${it.detectedDialogs}")}
         autoLearning?.let { writer.println(it.summary()) }
         windows.forEach { writer.println("window=${it.id}, type=${it.type}, focused=${it.isFocused}, active=${it.isActive}") }
     }
     override fun onDestroy() {
+        (application as TiaoApplication).wirelessBootstrap.cancelAssistance("无障碍服务断开")
+        pairingAssistant?.close();pairingAssistant=null
         clearNodes()
         autoLearning?.close()
         hideOverlay(); scope.cancel(); repository.connected.value = false

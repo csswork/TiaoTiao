@@ -9,6 +9,8 @@ import java.lang.reflect.Method
 
 /** Available only in the explicitly authorized shell UserService, never in the app process. */
 internal class DirectSystemTouch private constructor(private val manager: Any,private val inject: Method,private val display: Method) {
+    var lastReason="not_attempted"
+        private set
     companion object {
         fun resolve(): DirectSystemTouch? = runCatching {
             val type=Class.forName(if(Build.VERSION.SDK_INT>=34) "android.hardware.input.InputManagerGlobal" else "android.hardware.input.InputManager")
@@ -18,6 +20,7 @@ internal class DirectSystemTouch private constructor(private val manager: Any,pr
         }.getOrNull()
     }
     fun tap(x: Int,y: Int,pressMs: Long): Boolean {
+        lastReason="inject_started"
         val device=InputDevice.getDeviceIds().firstOrNull {id ->InputDevice.getDevice(id)?.supportsSource(InputDevice.SOURCE_TOUCHSCREEN)==true} ?: 0
         val pointer=MotionEvent.PointerProperties().apply {id=0;toolType=MotionEvent.TOOL_TYPE_FINGER}
         val down=SystemClock.uptimeMillis()
@@ -32,12 +35,16 @@ internal class DirectSystemTouch private constructor(private val manager: Any,pr
         var attempted=false;var released=false
         return try {
             attempted=true
-            if(!send(MotionEvent.ACTION_DOWN)) return false
+            if(!send(MotionEvent.ACTION_DOWN)) {lastReason="down_rejected";return false}
             SystemClock.sleep(pressMs/2)
-            if(!send(MotionEvent.ACTION_MOVE)) return false
+            if(!send(MotionEvent.ACTION_MOVE)) {lastReason="move_rejected";return false}
             SystemClock.sleep((pressMs-(SystemClock.uptimeMillis()-down)).coerceAtLeast(0))
-            val accepted=send(MotionEvent.ACTION_UP);released=accepted;accepted
-        } catch(_: Exception) {false}
+            val accepted=send(MotionEvent.ACTION_UP);released=accepted
+            lastReason=if(accepted) "injected" else "up_rejected";accepted
+        } catch(error: Exception) {
+            val cause=(error as? java.lang.reflect.InvocationTargetException)?.targetException ?: error
+            lastReason=if(cause is SecurityException) "inject_permission_denied" else "inject_exception_${cause.javaClass.simpleName}";false
+        }
         finally {if(attempted && !released) runCatching {send(MotionEvent.ACTION_CANCEL)}}
     }
 }
