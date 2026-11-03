@@ -54,10 +54,16 @@ class AutoLearning(private val service: SkipAccessibilityService,
     fun leaving(owner: String) {
         val rule=pendingRule ?: return
         if (owner==rule.packageName) return
+        // Transient system windows (security prompts, launcher, system UI, permission sheets) are not the tap
+        // opening an ad. Only another real app taking the screen right after the touch blames the target.
+        if (owner in setOf("android","com.android.systemui",service.packageName) || owner.startsWith("com.miui.") ||
+            owner.startsWith("com.xiaomi.") || owner.contains("permissioncontroller") || owner.contains("launcher")) {
+            repository.log(rule.packageName,"点击后短暂出现系统窗口（$owner），继续检查结果");return
+        }
         if (SystemClock.elapsedRealtime()-tapAt<600) {
-            pause(rule,"点击后前台应用变化，已暂停方案")
-            repository.reportDetection(rule.packageName,"点击后前台应用变化，智能方案已暂停")
-        } else repository.reportDetection(rule.packageName,"结果检查期间离开应用，本次不计为验证成功")
+            pause(rule,"点击后前台切到其他应用，已暂停方案")
+            repository.reportDetection(rule.packageName,"点击后前台切到「$owner」，智能方案已暂停")
+        } else repository.reportDetection(rule.packageName,"结果检查期间切到「$owner」，本次不计为验证成功")
         pendingRule=null
     }
     fun demo(screen: ScreenSnapshot) = screen.packageName==service.packageName &&
@@ -135,6 +141,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
             }
             if(baselineDone || observeBaseline(frame)) return
             if (adSeenAt==0L && frame.signals.advertisement) adSeenAt=frame.at
+            confirmLearnedControls(frame,screen)
             val signals="ad=${frame.signals.advertisement},skip=${frame.signals.skips.size},home=${frame.signals.home},timer=${frame.signals.countdown}"
             if (lastSignals!=signals) {
                 lastSignals=signals;repository.reportDetection(screen.packageName,"端侧 AI 已读取画面：广告标志=${frame.signals.advertisement}，跳过目标=${frame.signals.skips.size}，首页=${frame.signals.home}")
@@ -214,9 +221,9 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     return
                 }
                 val baseline=repository.visualBaseline(rule.behavior())
-                if (!demo(screen) && VisualPolicy.observeNaturalEnding(rule,frame.signals.countdown,baseline,repository.baselineObservations(rule.behavior()))) {
+                if (!demo(screen) && VisualPolicy.observeNaturalEnding(rule,frame.signals.countdown,baseline,repository.baselineObservations(rule.id))) {
                     // Count the session up front: an observation that never yields a baseline must not block clicking forever.
-                    repository.recordBaselineObservation(rule.behavior())
+                    repository.recordBaselineObservation(rule.id)
                     baselineRule=rule;baselineBefore=frame.jpeg;baselineReference=frame.patch(Area(.05f,.12f,.95f,.88f))
                     baselineLastAdAt=frame.at
                     repository.reportDetection(screen.packageName,"本轮自动观察自然结束，不点击；即使首页有关闭标记也由 AI 检查")
@@ -230,6 +237,13 @@ class AutoLearning(private val service: SkipAccessibilityService,
                 if(repository.previews.entries.value.none {it.ruleId==chosen.id && it.kind==com.haibo.tiaotiao.data.PreviewKind.RECOGNITION})
                     repository.savePreview(chosen,frame.jpeg,chosen.target,com.haibo.tiaotiao.data.PreviewKind.RECOGNITION,frame.patch(Area(.05f,.12f,.95f,.88f)))
                 if(refined!=null || nativeGeometry!=null) repository.log(screen.packageName,"已用当前局部文字或控件边界校准触控中心")
+                // A node rule whose node is absent may face a different ad layout (e.g. "立即进入" where the skip was).
+                // Its learned coordinates are used only when a skip/close label is visible there right now.
+                if(chosen.tapMethod==TapMethod.ACCESSIBILITY && VisualPolicy.nativeTarget(chosen,screen,chosen.target)==null &&
+                    VisualPolicy.controlTarget(clickArea,frame.signals.skips)==null) {
+                    repository.log(screen.packageName,"学到的控件不在当前画面，原位置也未见跳过文字，未点击")
+                    return
+                }
                 val unchanged=try {capture.targetUnchanged(frame,clickArea)} catch(c: CancellationException) {throw c} catch(_: Exception) {false}
                 if(!unchanged) {
                     app.touchJournal.record("PRECHECK","target_changed",screen.packageName,chosen.id,details=mapOf("comparison" to capture.lastTargetCheck))
@@ -373,6 +387,18 @@ class AutoLearning(private val service: SkipAccessibilityService,
                 if (app.visualLearner.enqueue(frame)) { queued++;imageQueued++;nextLearnAt=SystemClock.elapsedRealtime()+900;service.checkStatus(screen.packageName,"正在识别广告") }
             }
         }
+    }
+    /** Full-screen OCR misses small translucent buttons over busy creatives. Where this scene already learned a
+     * skip/close control, read that spot again from a magnified crop and add a confirmed label to the frame. */
+    private suspend fun confirmLearnedControls(frame: VisualFrame,screen: ScreenSnapshot) {
+        // Automatically paused targets are included: a confirmed label there lets a fresh local proposal recover them.
+        val learned=repository.visualRules.value.filter {AdRecognition.matchesScene(it,screen) && !VisualPolicy.userPaused(it) &&
+            VisualPolicy.controlTarget(it.target,frame.signals.skips)==null}.sortedByDescending {it.createdAt}
+            .map {it.target}.distinctBy {"${(it.left*40).toInt()}:${(it.top*80).toInt()}"}.take(6)
+        val found=learned.mapNotNull {target -> try {capture.refineControl(frame,target)} catch(c: CancellationException) {throw c} catch(_: Exception) {null}}
+        if(found.isEmpty()) return
+        // refineControl accepts literal skip or close text only, so these are explicit labels at a learned position.
+        frame.signals=frame.signals.copy(skips=(frame.signals.skips+found).distinct(),explicitSkips=(frame.signals.explicitSkips+found).distinct())
     }
     /** Whether the current app screen shows its bottom navigation (a home page); null when it cannot be captured. */
     suspend fun homeVisible(): Boolean? {

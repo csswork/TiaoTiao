@@ -13,6 +13,10 @@ class VisualExecutionTest {
         assertNull(VisualExecution.explicitTarget(signals.copy(home=true),area))
         assertNull(VisualExecution.explicitTarget(signals.copy(explicitSkips=listOf(area,Area(.1f,.8f,.2f,.85f))),area))
         assertNull(VisualExecution.explicitTarget(signals.copy(explicitSkips=listOf(Area(.4f,.45f,.6f,.5f))),Area(.4f,.45f,.6f,.5f)))
+        // Round mid-height side buttons observed on a recipe app (right and left variants).
+        val right=Area(.876f,.709f,.958f,.725f);val left=Area(.03f,.71f,.13f,.75f)
+        assertEquals(right,VisualExecution.explicitTarget(signals.copy(explicitSkips=listOf(right)),right))
+        assertEquals(left,VisualExecution.explicitTarget(signals.copy(explicitSkips=listOf(left)),left))
     }
     @Test fun `nested OCR and node boxes of one skip collapse to the tightest box`() {
         // Observed on a carrier app: an OCR line inside the pill-shaped node bounds.

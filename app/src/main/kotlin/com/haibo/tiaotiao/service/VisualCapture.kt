@@ -15,7 +15,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.abs
 
-class VisualFrame(val screen: ScreenSnapshot, val bitmap: Bitmap, val signals: VisualSignals,
+class VisualFrame(val screen: ScreenSnapshot, val bitmap: Bitmap, var signals: VisualSignals,
     val jpeg: ByteArray, val at: Long) : AutoCloseable {
     private val targetHashes=mutableMapOf<Area,String>()
     fun patch(area: Area): String = patchFrom(bitmap,area)
@@ -107,18 +107,30 @@ class VisualCapture(private val service: AccessibilityService,private val overla
         val crop=Bitmap.createBitmap(source,left,top,right-left,bottom-top)
         val scale=320f/crop.width
         val image=Bitmap.createScaledBitmap(crop,320,(crop.height*scale).toInt().coerceAtLeast(1),true)
-        try {
+        suspend fun read(bitmap: Bitmap): Area? {
             val result=kotlin.coroutines.suspendCoroutine<com.google.mlkit.vision.text.Text> { c ->
-                recognizer.process(InputImage.fromBitmap(image,0)).addOnSuccessListener {c.resume(it)}.addOnFailureListener {c.resumeWithException(it)}
+                recognizer.process(InputImage.fromBitmap(bitmap,0)).addOnSuccessListener {c.resume(it)}.addOnFailureListener {c.resumeWithException(it)}
             }
             currentCoroutineContext().ensureActive()
-            result.textBlocks.flatMap {it.lines}.mapNotNull {line ->
-                if(!SignalText.isSkip(line.text) && SignalText.sanitize(line.text)!="关闭") return@mapNotNull null
+            return result.textBlocks.flatMap {it.lines}.mapNotNull {line ->
+                val text=line.text.replace(Regex("\\s"),"")
+                if(!SignalText.isSkip(text) && SignalText.sanitize(text)!="关闭") return@mapNotNull null
                 val r=line.boundingBox ?: return@mapNotNull null
                 Area((left+r.left/scale)/source.width,(top+r.top/scale)/source.height,
                     (left+r.right/scale)/source.width,(top+r.bottom/scale)/source.height).takeIf {VisualPolicy.controlTarget(expected,listOf(it))!=null}
             }.distinct().singleOrNull()
-        } finally {if(image!==crop) image.recycle();crop.recycle()}
+        }
+        var contrast: Bitmap?=null
+        try {
+            read(image) ?: run {
+                // White text on a translucent grey button over a light creative: stretch grey contrast and read again.
+                val boosted=Bitmap.createBitmap(image.width,image.height,Bitmap.Config.ARGB_8888).also {contrast=it}
+                val matrix=ColorMatrix().apply {setSaturation(0f);postConcat(ColorMatrix(floatArrayOf(
+                    2.2f,0f,0f,0f,-150f, 0f,2.2f,0f,0f,-150f, 0f,0f,2.2f,0f,-150f, 0f,0f,0f,1f,0f)))}
+                Canvas(boosted).drawBitmap(image,0f,0f,Paint().apply {colorFilter=ColorMatrixColorFilter(matrix)})
+                read(boosted)
+            }
+        } finally {contrast?.recycle();if(image!==crop) image.recycle();crop.recycle()}
     }
     private suspend fun captureWorker(screen: ScreenSnapshot,display: Boolean): VisualFrame {
         check(Build.VERSION.SDK_INT >= 30) { "视觉学习需要 Android 11 及以上" }
@@ -156,7 +168,8 @@ class VisualCapture(private val service: AccessibilityService,private val overla
             val skipLines = lines.filter { isSkipControl(it.text) && it.boundingBox != null }
             val skips = (skipLines.map { area(requireNotNull(it.boundingBox)) } +
                 screen.nodes.filter { SignalText.hasSkip(it.label) || SignalText.canonical(it.label)=="关闭" }.map { it.bounds }).filter { it.valid() }.distinct()
-            val explicitSkips=(skipLines.filter {SignalText.isSkip(it.text)}.map {area(requireNotNull(it.boundingBox))} +
+            // OCR splits the two characters inside a round button ("跳 过"); judge the compacted text.
+            val explicitSkips=(skipLines.filter {SignalText.isSkip(it.text.replace(Regex("\\s"),""))}.map {area(requireNotNull(it.boundingBox))} +
                 screen.nodes.filter {SignalText.hasSkip(it.label)}.map {it.bounds}).filter {it.valid()}.distinct()
             val ad = screen.nodes.any { SignalText.canonical(it.label).split('|').contains("广告") } ||
                 lines.any { it.text.replace(Regex("[\\s|｜·]"),"") in setOf("广告","AD","Advertisement") }
@@ -185,7 +198,8 @@ class VisualCapture(private val service: AccessibilityService,private val overla
                 return ad && line.text.length<=12 && !Regex("\\d{3,}|@|https?://").containsMatchIn(line.text) &&
                     a.right>.65f && (a.top<.18f || a.bottom>.82f)
             }
-            lines.filterNot { SignalText.isPublicControlText(it.text) || it.text.trim() in navigation || possibleControl(it) ||
+            // Never mask a recognised skip/close control: the model must see the very button it is asked to locate.
+            lines.filterNot { it in skipLines || SignalText.isPublicControlText(it.text) || it.text.trim() in navigation || possibleControl(it) ||
                 it.text.trim().matches(Regex("\\d{1,2}\\s*(?:秒|s|S)")) }.forEach {
                 it.boundingBox?.let { r -> canvas.drawRect(r,paint) }
             }

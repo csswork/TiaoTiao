@@ -734,7 +734,9 @@ class SkipAccessibilityService : AccessibilityService() {
             repository.reportDetection(screen.packageName,if(accepted) "已对 Jev 选中的原生控件发起关闭，等待结果检查" else "原生控件未接受关闭，已停止本轮")
             return accepted
         }
-        if(AdRecognition.candidates(fresh).count {x in it.bounds.left..it.bounds.right && y in it.bounds.top..it.bounds.bottom}>1) return reject("ambiguous_target")
+        // A skip label inside its clickable container is one control; only side-by-side controls are ambiguous.
+        val under=AdRecognition.candidates(fresh).filter {x in it.bounds.left..it.bounds.right && y in it.bounds.top..it.bounds.bottom}.map {it.bounds}
+        if(under.size>1 && VisualExecution.singleControl(under)==null) return reject("ambiguous_target")
         gate.dispatched()
         val touchStarted=SystemClock.elapsedRealtime()
         val result=routeTouch(useEnhanced,

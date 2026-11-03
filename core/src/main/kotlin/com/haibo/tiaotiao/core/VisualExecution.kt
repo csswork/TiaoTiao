@@ -10,11 +10,12 @@ object VisualExecution {
         return precise.takeIf {valid.all {x in it.left..it.right && y in it.top..it.bottom}}
     }
     /** A literal skip at a screen edge in two launch frames needs no remote coordinate guess. Many splash
-     * ads and branded launch pages show no readable "广告" badge, so the badge is not required here. */
+     * ads and branded launch pages show no readable "广告" badge, so the badge is not required here. Edges
+     * include the left/right sides: some ads put a round "跳过" button mid-height beside the creative. */
     fun explicitTarget(signals: VisualSignals,previous: Area?): Area? {
         if(signals.home || previous==null) return null
         val area=singleControl(signals.explicitSkips) ?: return null
-        if(!area.valid() || area.right-area.left>.25f || area.bottom-area.top>.12f || (area.top>=.2f && area.bottom<=.8f)) return null
+        if(!area.valid() || area.right-area.left>.25f || area.bottom-area.top>.12f || (area.top>=.2f && area.bottom<=.8f && area.left>=.2f && area.right<=.8f)) return null
         return VisualPolicy.controlTarget(previous,listOf(area))
     }
     /** A second touch requires a fresh, unchanged launch screen and the same observed control. */
