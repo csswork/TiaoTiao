@@ -142,6 +142,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
             if(baselineDone || observeBaseline(frame)) return
             if (adSeenAt==0L && frame.signals.advertisement) adSeenAt=frame.at
             confirmLearnedControls(frame,screen)
+            if(frame.signals.advertisement || frame.signals.skips.isNotEmpty()) service.noteLaunchAd(screen.packageName)
             val signals="ad=${frame.signals.advertisement},skip=${frame.signals.skips.size},home=${frame.signals.home},timer=${frame.signals.countdown}"
             if (lastSignals!=signals) {
                 lastSignals=signals;repository.reportDetection(screen.packageName,"端侧 AI 已读取画面：广告标志=${frame.signals.advertisement}，跳过目标=${frame.signals.skips.size}，首页=${frame.signals.home}")
@@ -221,7 +222,8 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     return
                 }
                 val baseline=repository.visualBaseline(rule.behavior())
-                if (!demo(screen) && VisualPolicy.observeNaturalEnding(rule,frame.signals.countdown,baseline,repository.baselineObservations(rule.id))) {
+                if (!demo(screen) && VisualPolicy.observeNaturalEnding(rule,frame.signals.countdown,baseline,repository.baselineObservations(rule.id),
+                    VisualPolicy.controlTarget(rule.target,frame.signals.explicitSkips)!=null)) {
                     // Count the session up front: an observation that never yields a baseline must not block clicking forever.
                     repository.recordBaselineObservation(rule.id)
                     baselineRule=rule;baselineBefore=frame.jpeg;baselineReference=frame.patch(Area(.05f,.12f,.95f,.88f))
@@ -330,8 +332,11 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     val remaining=frame.signals.countdown?.times(1000L) ?: (baseline-(frame.at-adSeenAt))
                     // The first confirmed home frame establishes transition time; the second only
                     // corroborates it and may arrive later because OCR work takes time.
-                    val early=remaining>=2000 && after1.at-frame.at<remaining-300
-                    val basis=if (frame.signals.countdown!=null) "countdown" else if (baseline>0) "observed_baseline" else "unknown"
+                    // Without a countdown or learned duration, a literal skip visible just before the touch and the screen
+                    // changing within 2.5 s of that frame is the timing evidence; AI review of the frames is still required.
+                    val explicitLabel=frame.signals.countdown==null && baseline<=0 && VisualPolicy.controlTarget(clickArea,frame.signals.explicitSkips)!=null
+                    val early=(remaining>=2000 && after1.at-frame.at<remaining-300) || (explicitLabel && after1.at-frame.at<2500)
+                    val basis=if (frame.signals.countdown!=null) "countdown" else if (baseline>0) "observed_baseline" else if (explicitLabel) "explicit_label" else "unknown"
                     app.touchJournal.record("RESULT",if(after2.signals.skips.any {it.near(clickArea)}) "ad_still_visible" else "result_unknown",
                         screen.packageName,chosen.id,requestId=service.touchExecutions.lastOrNull {it.ruleId==chosen.id}?.requestId.orEmpty(),details=mapOf(
                             "changed" to changed.toString(),"advertisement" to after2.signals.advertisement.toString(),"home" to after2.signals.home.toString(),

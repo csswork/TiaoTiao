@@ -65,8 +65,10 @@ object VisualPolicy {
         val backoff=if(failures==1) 15_000L else 60_000L
         return rule.copy(state=VisualRuleState.PAUSED,automaticFailures=failures,retryAfter=now+backoff,lastResult=message)
     }
-    fun observeNaturalEnding(rule: VisualRule,countdown: Int?,baseline: Long,observations: Int) =
-        !rule.active() && countdown==null && baseline==0L && observations<MAX_BASELINE_OBSERVATIONS && rule.evidence.any {it.timingBasis=="unknown"}
+    /** A literal "跳过" at the target is never held back for a timing-only session: closing right after that
+     * label is visible is its own timing evidence ("explicit_label"). */
+    fun observeNaturalEnding(rule: VisualRule,countdown: Int?,baseline: Long,observations: Int,explicitLabel: Boolean=false) =
+        !explicitLabel && !rule.active() && countdown==null && baseline==0L && observations<MAX_BASELINE_OBSERVATIONS && rule.evidence.any {it.timingBasis=="unknown"}
     /** Fresh AI recognition is required to recover an automatically paused target. */
     fun replaceProposal(old: VisualRule?,incoming: VisualRule,now: Long): VisualRule? {
         if(old==null) return incoming
@@ -160,7 +162,7 @@ object VisualPolicy {
     }
     fun record(rule: VisualRule, session: String, early: Boolean, home: Boolean, sameApp: Boolean, now: Long, timingBasis: String = "countdown"): VisualRule {
         if (!home || !sameApp) return pauseAutomatically(rule,"自动检查未通过，稍后自动重新识别",now)
-        require(timingBasis in setOf("countdown","observed_baseline","unknown"))
+        require(timingBasis in setOf("countdown","observed_baseline","explicit_label","unknown"))
         val proof = AutoEvidence(session, rule.behavior(), now, early, home, sameApp,timingBasis)
         val next = rule.copy(evidence = (rule.evidence.filterNot { it.session == session } + proof).takeLast(20),
             automaticFailures = if (early) 0 else rule.automaticFailures)

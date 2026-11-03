@@ -46,6 +46,9 @@ class VisualRecoveryTest {
         assertFalse(VisualPolicy.observeNaturalEnding(unknown,5,0,0))
         assertFalse(VisualPolicy.observeNaturalEnding(unknown,null,3000,0))
         assertFalse(VisualPolicy.observeNaturalEnding(rule,null,0,0))
+        assertFalse(VisualPolicy.observeNaturalEnding(unknown,null,0,0,explicitLabel=true))
+        val labelled=VisualPolicy.record(rule,"tap",true,true,true,1,"explicit_label")
+        assertEquals(1,labelled.successfulSessions())
     }
     @Test fun `user pause and verified rules are never overwritten by a model`() {
         val disabled=rule.copy(state=VisualRuleState.PAUSED,lastResult="用户反馈点错，已停用")

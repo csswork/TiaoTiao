@@ -127,11 +127,27 @@ class SkipAccessibilityService : AccessibilityService() {
     private var jumpBackDone=false
     private var jumpRecorded: Long?=null
     private var jumpRecovered: Long?=null
+    /** Evidence that decides whether a jump was the ad's doing: a launch ad was seen in this session, and the user
+     * did not click anything in the app (clicks within a second of TiaoTiao's own touch are TiaoTiao's). */
+    private var launchAdSeen=false
+    private var userClickedAt=0L
+    private var tiaoTouchAt=0L
+    internal fun noteLaunchAd(pkg: String) {if(launchSession?.second==pkg) launchAdSeen=true}
+    private fun adCausedJump(source: String,kind: String): Boolean {
+        val session=launchSession ?: return false
+        val reason=when {
+            !launchAdSeen -> "no_launch_ad"
+            userClickedAt>=session.third -> "user_clicked"
+            else -> return true
+        }
+        touchJournal.record("JUMP","jump_ignored_$reason",source,details=mapOf("kind" to kind))
+        return false
+    }
     /** Newest activity class per selected app; unlike launchClasses it survives the app's session being replaced. */
     private val lastClass=mutableMapOf<String,String>()
     private fun sessionObserved(pkg: String) {
         if(pkg==packageName || pkg !in repository.settings.value.packages || launchSession?.first==gate.generation) return
-        launchSession=Triple(gate.generation,pkg,SystemClock.elapsedRealtime());launchClasses.clear();jumpBackDone=false
+        launchSession=Triple(gate.generation,pkg,SystemClock.elapsedRealtime());launchClasses.clear();jumpBackDone=false;launchAdSeen=false
         val touch=(application as TiaoApplication).enhancedTouch
         // Prevention needs the shell service; refusing the dialog afterwards (below) works without it.
         if(repository.adJumps.known(pkg) && repository.settings.value.enhancedTouch && touch.ownedReady) scope.launch {
@@ -154,6 +170,8 @@ class SkipAccessibilityService : AccessibilityService() {
         val (_,source,startedAt)=launchSession ?: return
         val now=SystemClock.elapsedRealtime()
         if(now-startedAt>JUMP_WINDOW_MS) return
+        // A "微信登录"-style open the user asked for must be allowed, not refused.
+        if(!adCausedJump(source,"dialog")) return
         jumpUntil=now+3000
         val landing=landingClass(now)
         scope.launch {
@@ -224,7 +242,7 @@ class SkipAccessibilityService : AccessibilityService() {
             // System choosers, permission prompts and security dialogs are the app's own flow, not an ad jump.
             owner in setOf("android","com.android.systemui",WAKEPATH_PACKAGE,packageName) || owner.contains("permissioncontroller") ||
             owner.startsWith("com.miui.") || owner.startsWith("com.xiaomi.")) return
-        recoverDirectJump(session.second,owner)
+        if(adCausedJump(session.second,"direct")) recoverDirectJump(session.second,owner)
     }
     private val homePackages by lazy {
         packageManager.queryIntentActivities(android.content.Intent(android.content.Intent.ACTION_MAIN).addCategory(android.content.Intent.CATEGORY_HOME),0)
@@ -293,6 +311,11 @@ class SkipAccessibilityService : AccessibilityService() {
             return
         }
         val eventPackage = event.packageName?.toString().orEmpty()
+        if(event.eventType==AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            val now=SystemClock.elapsedRealtime()
+            if(eventPackage==launchSession?.second && now-tiaoTouchAt>1000) userClickedAt=now
+            return
+        }
         if(eventPackage==WAKEPATH_PACKAGE && event.eventType==AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             event.className?.toString()?.contains("wakepath")==true) {
             // A system "app wants to open another app" dialog is not the launch session leaving its app.
@@ -662,7 +685,7 @@ class SkipAccessibilityService : AccessibilityService() {
             if (!eligible(it.screen) || !gate.isOpen(it.screen.packageName, SystemClock.elapsedRealtime())) return
             val target = RuleEngine.locate(current, it.screen)
             if (target == null) { repository.log(current.packageName, "页面或目标已变化，取消点击"); return }
-            gate.dispatched()
+            gate.dispatched();tiaoTouchAt=SystemClock.elapsedRealtime()
             val accepted = it.handles[target.path]?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
             if (trial && accepted) {
                 val updated = RuleEngine.recordTrial(current, true, System.currentTimeMillis())
@@ -722,7 +745,7 @@ class SkipAccessibilityService : AccessibilityService() {
                 valid=handle.refresh() && handle.packageName?.toString()==screen.packageName && handle.windowId==screen.windowId &&
                     handle.viewIdResourceName.orEmpty()==nativeTarget?.resourceId.orEmpty() && handle.className?.toString()==nativeTarget?.className
                 if(valid) {handle.getBoundsInScreen(currentBounds);valid=handle.isVisibleToUser && currentBounds.contains(pixelX,pixelY)}
-                if(!valid) false else {gate.dispatched();handle.performAction(AccessibilityNodeInfo.ACTION_CLICK)}
+                if(!valid) false else {gate.dispatched();tiaoTouchAt=SystemClock.elapsedRealtime();handle.performAction(AccessibilityNodeInfo.ACTION_CLICK)}
             }}
                 finally {@Suppress("DEPRECATION") handle.recycle()}
             if(!valid) return reject("native_handle_changed")
@@ -737,7 +760,7 @@ class SkipAccessibilityService : AccessibilityService() {
         // A skip label inside its clickable container is one control; only side-by-side controls are ambiguous.
         val under=AdRecognition.candidates(fresh).filter {x in it.bounds.left..it.bounds.right && y in it.bounds.top..it.bounds.bottom}.map {it.bounds}
         if(under.size>1 && VisualExecution.singleControl(under)==null) return reject("ambiguous_target")
-        gate.dispatched()
+        gate.dispatched();tiaoTouchAt=SystemClock.elapsedRealtime()
         val touchStarted=SystemClock.elapsedRealtime()
         val result=routeTouch(useEnhanced,
             system={enhanced.tap(screen.packageName,pixelX,pixelY,screen.width,screen.height)},
