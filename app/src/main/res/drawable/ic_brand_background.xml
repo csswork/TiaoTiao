@@ -3,7 +3,12 @@
     android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
     <path android:pathData="M0 0H108V108H0Z">
         <aapt:attr name="android:fillColor">
-            <gradient android:type="linear" android:startX="12" android:startY="0" android:endX="100" android:endY="108" android:startColor="#2E795B" android:endColor="#123F32" />
+            <gradient android:type="linear" android:startX="12" android:startY="0" android:endX="100" android:endY="108" android:startColor="#2C8160" android:endColor="#0E382B" />
+        </aapt:attr>
+    </path>
+    <path android:pathData="M0 0H108V108H0Z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="radial" android:centerX="30" android:centerY="18" android:gradientRadius="80" android:startColor="#1FFFFFFF" android:endColor="#00FFFFFF" />
         </aapt:attr>
     </path>
 </vector>
