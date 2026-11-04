@@ -50,6 +50,7 @@ private fun accessibilityListed(context: Context): Boolean {
     val settings by repository.settings.collectAsState()
     val connected by repository.connected.collectAsState()
     val jumps by repository.adJumps.items.collectAsState()
+    val refusals by repository.touchRefusals.items.collectAsState()
     val vision by repository.visionConnection.collectAsState()
     val touch by app.enhancedTouch.state.collectAsState()
     val wireless by app.wirelessBootstrap.state.collectAsState()
@@ -70,7 +71,9 @@ private fun accessibilityListed(context: Context): Boolean {
         }
     }
     val labels=remember {mutableStateMapOf<String,String>()}
-    LaunchedEffect(jumps) {jumps.filter {it.unread}.forEach {labels[it.packageName]=app.appLabels.load(it.packageName)}}
+    LaunchedEffect(jumps,refusals) {
+        (jumps.filter {it.unread}.map {it.packageName}+refusals.filter {it.confirmed}.map {it.packageName}).forEach {labels[it]=app.appLabels.load(it)}
+    }
     val service=SkipAccessibilityService.instance
     val bound=connected && service!=null
     // The dashboard's own window changes produce events; none for 5 s after it came to front means a stalled service.
@@ -88,7 +91,9 @@ private fun accessibilityListed(context: Context): Boolean {
         // Only worth raising when the service has actually been lost; otherwise most phones would always show it.
         batteryRestricted=batteryLimited && (!listed || !bound || silent),
         captureFailure=capture,
-        adJumps=jumps.filter {it.unread}.map {it.packageName to (labels[it.packageName] ?: it.packageName)}))
+        adJumps=jumps.filter {it.unread}.map {it.packageName to (labels[it.packageName] ?: it.packageName)},
+        // Only apps still selected for skipping; a removed app's refusal is no longer actionable.
+        touchRefusals=refusals.filter {it.confirmed && it.packageName in settings.packages}.map {it.packageName to (labels[it.packageName] ?: it.packageName)}))
 }
 
 private val Amber=Color(0xFF5A3B12)

@@ -140,7 +140,9 @@ class SkipAccessibilityService : AccessibilityService() {
     private fun adCausedJump(source: String,kind: String): Boolean {
         val session=launchSession ?: return false
         val reason=when {
-            !launchAdSeen -> "no_launch_ad"
+            // Shake/flip ads can fire before the first screenshot shows the ad; within 4 s of launch, without a user
+            // click, nobody else hands the screen to another app.
+            !launchAdSeen && SystemClock.elapsedRealtime()-session.third>4000 -> "no_launch_ad"
             userClickedAt>=session.third -> "user_clicked"
             else -> return true
         }
@@ -799,8 +801,7 @@ class SkipAccessibilityService : AccessibilityService() {
             val outcome=when(mode) {
                 "gesture" -> dispatchTouch(x,y).toString()
                 "gesture-long" -> dispatchStroke(listOf(x-1f to y-1f,x+1f to y+1f),220).toString()
-                "gesture-jitter" -> dispatchStroke(listOf(x-2f to y+1f,x+0f to y-1f,x+2f to y+0f,x+1f to y+2f),140).toString()
-                "native", "nodes" -> withContext(Dispatchers.IO) {
+                "gesture-jitter" -> dispatchStroke(listOf(x-2f to y+1f,x+0f to y-1f,x+2f to y+0f,x+1f to y+2f),140).toString()                "native", "nodes" -> withContext(Dispatchers.IO) {
                     val root=rootInActiveWindow ?: return@withContext "no-root"
                     val hits=mutableListOf<AccessibilityNodeInfo>();val bounds=android.graphics.Rect();var total=0
                     fun walk(n: AccessibilityNodeInfo,depth: Int) {

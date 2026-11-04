@@ -33,6 +33,8 @@ data class HealthSnapshot(
     val captureFailure: String?=null,
     /** Apps whose launch ad opened another app by itself, not yet acknowledged: package to label. */
     val adJumps: List<Pair<String,String>> = emptyList(),
+    /** Apps confirmed to ignore accessibility touches: package to label. */
+    val touchRefusals: List<Pair<String,String>> = emptyList(),
 )
 
 object HealthCheck {
@@ -66,6 +68,9 @@ object HealthCheck {
             "最近一次开屏截图失败：$it。如持续出现，请在无障碍设置中关闭 TiaoTiao 后重新打开。",HealthAction.ACCESSIBILITY_SETTINGS,"打开无障碍设置"))}
         s.adJumps.forEach {(pkg,label) -> add(HealthIssue("ad_jump_$pkg",HealthLevel.WARNING,"「$label」的开屏广告会自己跳转",
             "摇一摇 / 翻转类广告，不点也会打开广告页。",HealthAction.AD_JUMP,"查看解决方法",pkg))}
+        if(!s.enhancedReady) s.touchRefusals.forEach {(pkg,label) -> add(HealthIssue("touch_refusal_$pkg",HealthLevel.WARNING,
+            "「$label」会忽略无障碍点击","它会识别并拦截无障碍服务发出的点击，开屏广告只能等它自己结束。开启增强点击后可以自动跳过。",
+            HealthAction.ENHANCED_TOUCH,if(s.enhancedTouch) "检查增强点击" else "开启增强点击",pkg))}
         if(s.enhancedTouch && !s.enhancedReady) add(HealthIssue("enhanced",HealthLevel.INFO,
             if(!s.enhancedPaired) "增强点击尚未配对" else if(!s.wirelessDebugging) "增强点击未运行：无线调试已关闭" else "增强点击未运行",
             "普通点击仍然可用；部分广告的跳转拦截和传感器暂停需要增强点击。",HealthAction.ENHANCED_TOUCH,"去处理"))

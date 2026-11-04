@@ -65,4 +65,15 @@ class VisualExecutionTest {
         assertEquals(adjusted,VisualExecution.retryTarget(rule.copy(userAdjusted=true),screen,screen,adjusted,
             ad.copy(skips=listOf(observed)),0.0,1000,1))
     }
+    @Test fun `a touch is ignored only when the control is still there well after it`() {
+        fun ignored(signals: VisualSignals=ad,difference: Double=0.0,elapsed: Long=1000)=VisualExecution.touchIgnored(area,signals,difference,elapsed)
+        assertTrue(ignored())
+        assertFalse(ignored(elapsed=500))
+        assertFalse(ignored(signals=ad.copy(home=true)))
+        assertFalse(ignored(signals=ad.copy(skips=emptyList())))
+        // An animated creative still counts while the ad badge or the literal label remains.
+        assertTrue(ignored(difference=.3))
+        assertTrue(ignored(signals=ad.copy(advertisement=false,explicitSkips=listOf(area)),difference=.3))
+        assertFalse(ignored(signals=ad.copy(advertisement=false),difference=.3))
+    }
 }

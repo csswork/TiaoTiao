@@ -19,6 +19,11 @@ object VisualExecution {
         return VisualPolicy.controlTarget(previous,listOf(area))
     }
     /** A second touch requires a fresh, unchanged launch screen and the same observed control. */
+    /** A frame at least 900 ms after the latest touch that still shows the ad's control at the touched spot means the
+     * touch had no effect: the app ignored it. A later change of screen is then the ad ending by itself. */
+    fun touchIgnored(area: Area,signals: VisualSignals,difference: Double,elapsed: Long): Boolean =
+        elapsed>=900 && !signals.home && VisualPolicy.controlTarget(area,signals.skips)!=null &&
+            ((difference.isFinite() && difference<=.02) || signals.advertisement || VisualPolicy.controlTarget(area,signals.explicitSkips)!=null)
     fun retryTarget(rule: VisualRule,before: ScreenSnapshot,after: ScreenSnapshot,area: Area,
         signals: VisualSignals,difference: Double,elapsed: Long,attempts: Int,nativeFallback: Boolean=false): Area? {
         if((rule.tapMethod!=TapMethod.GESTURE && !(rule.tapMethod==TapMethod.ACCESSIBILITY && nativeFallback)) || attempts!=1 || elapsed !in 900..2500 ||

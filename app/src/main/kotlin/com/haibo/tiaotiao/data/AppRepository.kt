@@ -192,6 +192,7 @@ class AppRepository(private val context: Context) {
     }
     val connected = MutableStateFlow(false)
     val adJumps = AdJumps(context)
+    val touchRefusals = TouchRefusals(context)
     val sampleCount = MutableStateFlow(samplesDir.listFiles()?.size ?: 0)
 
     @Synchronized fun updateSettings(transform: (AppSettings) -> AppSettings) {
@@ -343,7 +344,7 @@ class AppRepository(private val context: Context) {
         baselinePrefs.edit().clear().apply()
         listOf("rules.recovery.json","visual_rules.recovery.json").forEach {File(context.filesDir,it).delete()}
         File(context.filesDir,"last_execution").deleteRecursively()
-        previews.clear();adJumps.clear()
+        previews.clear();adJumps.clear();touchRefusals.clear()
         detection.value=null;clearLogs()
     }
     @Synchronized fun put(rule: SkipRule) {

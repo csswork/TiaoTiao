@@ -37,4 +37,11 @@ class HealthCheckTest {
         assertEquals(listOf("a.b","c.d"),issues.map {it.packageName})
         assertTrue(issues.all {it.action==HealthAction.AD_JUMP})
     }
+    @Test fun `an app that ignores accessibility touches asks for enhanced touch until it runs`() {
+        val refusing=healthy.copy(touchRefusals=listOf("cn.damai" to "大麦"))
+        val issue=HealthCheck.evaluate(refusing).single()
+        assertEquals("touch_refusal_cn.damai",issue.id);assertEquals(HealthAction.ENHANCED_TOUCH,issue.action);assertEquals("开启增强点击",issue.actionLabel)
+        assertEquals("检查增强点击",HealthCheck.evaluate(refusing.copy(enhancedTouch=true,enhancedPaired=true,wirelessDebugging=true)).first().actionLabel)
+        assertTrue(HealthCheck.evaluate(refusing.copy(enhancedTouch=true,enhancedReady=true)).isEmpty())
+    }
 }

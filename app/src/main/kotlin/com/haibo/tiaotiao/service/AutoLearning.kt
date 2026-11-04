@@ -110,7 +110,8 @@ class AutoLearning(private val service: SkipAccessibilityService,
         begin(gen)
         if(!eligible(screen)) return
         if (attempts || SystemClock.elapsedRealtime()<nextCapture || !open(gen,screen.packageName)) return
-        nextCapture=SystemClock.elapsedRealtime()+550
+        // 350 ms is the platform's minimum interval between accessibility screenshots.
+        nextCapture=SystemClock.elapsedRealtime()+350
         val nodeReady = app.visualLearner.nodeAllowed(screen.packageName) && repository.vault.contains("jevKey")
         val cloudReady = app.visualLearner.allowed(screen.packageName)
         val hasActive = repository.visualRules.value.any { AdRecognition.matchesScene(it,screen) && it.active() }
@@ -253,7 +254,11 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     return
                 }
                 val checkStarted=SystemClock.elapsedRealtime()
-                val unchanged=try {capture.targetUnchanged(frame,clickArea)} catch(c: CancellationException) {throw c} catch(_: Exception) {false}
+                // A learned rule whose literal skip/close label was read at this spot in a frame under 500 ms old needs no
+                // second screenshot; the touch service still re-checks the foreground app and window before injecting.
+                val freshlyLabelled=chosen.active() && checkStarted-frame.at<500 &&
+                    (VisualPolicy.controlTarget(clickArea,frame.signals.explicitSkips)!=null || (chosen.tapMethod==TapMethod.ACCESSIBILITY && VisualPolicy.nativeTarget(chosen,screen,chosen.target)!=null))
+                val unchanged=freshlyLabelled || try {capture.targetUnchanged(frame,clickArea)} catch(c: CancellationException) {throw c} catch(_: Exception) {false}
                 val checkMs=SystemClock.elapsedRealtime()-checkStarted
                 if(!unchanged) {
                     app.touchJournal.record("PRECHECK","target_changed",screen.packageName,chosen.id,details=mapOf("comparison" to capture.lastTargetCheck))
@@ -280,6 +285,15 @@ class AutoLearning(private val service: SkipAccessibilityService,
                 repository.savePreview(chosen,frame.jpeg,clickArea,com.haibo.tiaotiao.data.PreviewKind.ACTION,frame.patch(Area(.05f,.12f,.95f,.88f)))
                 var tapCount=1
                 var actualArea=clickArea
+                // Accessibility lane (gesture or ACTION_CLICK): some apps drop these touches by their accessibility mark.
+                val accessibilityLane=service.touchExecutions.lastOrNull {it.ruleId==chosen.id}?.backend!="内置系统触控"
+                val refusingApp=accessibilityLane && repository.touchRefusals.confirmed(screen.packageName)
+                // The touch went to a control we trust: a verified rule or a literal skip/close label at the spot.
+                val credibleTarget=chosen.active() || VisualPolicy.controlTarget(clickArea,frame.signals.explicitSkips)!=null
+                var ignoredAfterTap=false
+                // A retry follows a first touch that left the ad unchanged; it only counts when the very next frame
+                // already shows the ad gone, otherwise the ad's own ending can coincide with it.
+                var closedRightAfterRetry: Boolean?=null
                 repository.reportDetection(screen.packageName,if (chosen.active()) "已复用智能规则，正在自动检查结果" else "已自动尝试缓存方案，正在检查结果；无需人工确认")
                 // Wait for two consecutive changed frames; the first frame can still be a launch/exit animation.
                 val afterFrames=mutableListOf<VisualFrame>()
@@ -303,9 +317,9 @@ class AutoLearning(private val service: SkipAccessibilityService,
                                 chosen.tapMethod==TapMethod.ACCESSIBILITY)
                         val retryUnchanged=retryTarget!=null && try {capture.targetUnchanged(observed,retryTarget)}
                             catch(c: CancellationException) {throw c} catch(_: Exception) {false}
-                        if(retryTarget!=null && retryUnchanged && repository.visualRules.value.any {it.id==chosen.id && it.behavior()==chosen.behavior() && !VisualPolicy.userPaused(it)}) {
+                        if(retryTarget!=null && retryUnchanged && !refusingApp && repository.visualRules.value.any {it.id==chosen.id && it.behavior()==chosen.behavior() && !VisualPolicy.userPaused(it)}) {
                             // Re-check the current ad instead of assuming that a completed gesture closed it.
-                            tapCount++;tapAt=SystemClock.elapsedRealtime()
+                            tapCount++;tapAt=SystemClock.elapsedRealtime();ignoredAfterTap=false;closedRightAfterRetry=null
                             repository.reportDetection(screen.packageName,"广告与关闭目标仍未变化，重新校准后补充一次短点")
                             if(tap(gen,snapshot,retryTarget,chosen,true)) {
                                 actualArea=retryTarget
@@ -314,6 +328,9 @@ class AutoLearning(private val service: SkipAccessibilityService,
                                 observed.close();continue
                             }
                         }
+                        if(VisualExecution.touchIgnored(actualArea,observed.signals,frame.difference(observed),observed.at-tapAt)) ignoredAfterTap=true
+                        if(tapCount>1 && closedRightAfterRetry==null) closedRightAfterRetry=
+                            frame.difference(observed)>.04 && VisualPolicy.controlTarget(actualArea,observed.signals.skips)==null && !observed.signals.advertisement
                         val changed=frame.difference(observed)>.04 && observed.signals.skips.none {it.near(clickArea)}
                         changedStreak=if(changed) changedStreak+1 else 0
                         afterFrames+=observed
@@ -325,6 +342,18 @@ class AutoLearning(private val service: SkipAccessibilityService,
                             afterFrames.all {frame.difference(it)>.01 && !it.signals.advertisement})) break
                     }
                     pendingRule=null
+                    if(tapCount>1 && closedRightAfterRetry!=true) ignoredAfterTap=true
+                    if(ignoredAfterTap && accessibilityLane && credibleTarget) {
+                        // The control stayed put well after the touch: the app ignored it. Whatever follows is the ad
+                        // ending by itself, which is neither a skip nor evidence against the rule's location.
+                        val refusal=repository.touchRefusals.record(screen.packageName)
+                        app.touchJournal.record("RESULT","touch_ignored",screen.packageName,chosen.id,
+                            requestId=service.touchExecutions.lastOrNull {it.ruleId==chosen.id}?.requestId.orEmpty(),
+                            details=mapOf("sessions" to refusal.sessions.toString(),"taps" to tapCount.toString()))
+                        repository.reportDetection(screen.packageName,"点击已发出但广告没有反应（${tapCount} 次），"+
+                            (if(refusal.confirmed) "此应用会忽略无障碍点击；" else "")+"等待广告自然结束，不计为跳过，方案保留；开启增强点击后可自动跳过")
+                        return
+                    }
                     if (afterFrames.size<2) {
                         app.touchJournal.record("RESULT","no_result_frames",screen.packageName,chosen.id)
                         // Missing screenshots say nothing about whether the target itself works.
@@ -337,7 +366,10 @@ class AutoLearning(private val service: SkipAccessibilityService,
                         VisualPolicy.matchesHome(chosen,beforeHash,firstHash,secondHash))
                     repository.log(screen.packageName,"结果观察：方式=${chosen.tapMethod}，连续变化=$changed，末帧广告=${after2.signals.advertisement}，原位置关闭标记=${after2.signals.skips.any {it.near(clickArea)}}，首页=${after2.signals.home}")
                     if(frame.difference(after1)>.04 && frame.difference(after2)>.04 && !after1.signals.advertisement && !after2.signals.advertisement &&
-                        listOf(after1,after2).none {VisualPolicy.controlTarget(clickArea,it.signals.skips)!=null}) service.announceSkip(screen.packageName)
+                        listOf(after1,after2).none {VisualPolicy.controlTarget(clickArea,it.signals.skips)!=null} && !ignoredAfterTap) {
+                        service.announceSkip(screen.packageName)
+                        if(accessibilityLane) repository.touchRefusals.clear(screen.packageName)
+                    }
                     val homeHash=VisualPolicy.homeTemplate(beforeHash,firstHash,secondHash)
                     val remaining=frame.signals.countdown?.times(1000L) ?: (baseline-(frame.at-adSeenAt))
                     // The first confirmed home frame establishes transition time; the second only
@@ -409,10 +441,12 @@ class AutoLearning(private val service: SkipAccessibilityService,
     /** Full-screen OCR misses small translucent buttons over busy creatives. Where this scene already learned a
      * skip/close control, read that spot again from a magnified crop and add a confirmed label to the frame. */
     private suspend fun confirmLearnedControls(frame: VisualFrame,screen: ScreenSnapshot) {
+        val scene=repository.visualRules.value.filter {AdRecognition.matchesScene(it,screen) && !VisualPolicy.userPaused(it)}
+        // Each crop costs one OCR pass; skip them all when full-screen OCR already labels a learned target.
+        if(scene.any {VisualPolicy.controlTarget(it.target,frame.signals.skips)!=null}) return
         // Automatically paused targets are included: a confirmed label there lets a fresh local proposal recover them.
-        val learned=repository.visualRules.value.filter {AdRecognition.matchesScene(it,screen) && !VisualPolicy.userPaused(it) &&
-            VisualPolicy.controlTarget(it.target,frame.signals.skips)==null}.sortedByDescending {it.createdAt}
-            .map {it.target}.distinctBy {"${(it.left*40).toInt()}:${(it.top*80).toInt()}"}.take(6)
+        val learned=scene.sortedWith(compareByDescending<VisualRule> {it.active()}.thenByDescending {it.createdAt})
+            .map {it.target}.distinctBy {"${(it.left*40).toInt()}:${(it.top*80).toInt()}"}.take(3)
         val found=learned.mapNotNull {target -> try {capture.refineControl(frame,target)} catch(c: CancellationException) {throw c} catch(_: Exception) {null}}
         if(found.isEmpty()) return
         // refineControl accepts literal skip or close text only, so these are explicit labels at a learned position.
