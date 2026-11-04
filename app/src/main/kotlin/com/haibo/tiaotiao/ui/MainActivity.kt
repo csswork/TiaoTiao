@@ -1,5 +1,7 @@
 package com.haibo.tiaotiao.ui
 
+import com.haibo.tiaotiao.data.HealthAction
+
 import android.content.ClipData
 import android.content.Intent
 import android.os.Bundle
@@ -91,6 +93,11 @@ class MainActivity : ComponentActivity() {
         var cloudDisclosure by remember { mutableStateOf(false) }
         var transferAction by remember { mutableStateOf<String?>(null) }
         var hasJevKey by remember { mutableStateOf(repository.vault.get("jevKey").isNotBlank()) }
+        val healthIssues = rememberHealthIssues(missingKey = when {
+            officialVision && !hasVisionKey -> "DeepSeek 官方 Key"
+            !officialVision && !hasJevKey -> "Jev API Key"
+            else -> null
+        })
         var focusJevKey by remember { mutableStateOf(false) }
         var focusVisionKey by remember { mutableStateOf(intent.getBooleanExtra("configure_vision",false)) }
         var exportSmart by rememberSaveable { mutableStateOf(false) }
@@ -215,19 +222,21 @@ class MainActivity : ComponentActivity() {
                     }})
                 else when (tab) {
                     0 -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                        if (if(officialVision) !hasVisionKey else !hasJevKey) item(key = "missing_ai_key") {
-                            Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp),
-                                colors = CardDefaults.cardColors(containerColor = Color(0xFFFFE8BF)),
-                                border = BorderStroke(1.dp, Color(0xFFE3BC77))) {
-                                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Text(if(officialVision) "尚未填写 DeepSeek 官方 Key" else "尚未填写 Jev API Key", style = MaterialTheme.typography.titleLarge,
-                                        fontWeight = FontWeight.Bold, color = Color(0xFF654516))
-                                    Text(if(officialVision) "填写独立的官方 Key，使用 DeepSeek 识别开屏广告及检查结果。" else "填写密钥并开启云端分析，即可使用 Jev 识别新的开屏广告。",
-                                        style = MaterialTheme.typography.bodyMedium, color = Color(0xFF654516))
-                                    Button(onClick = { focusVisionKey=officialVision;focusJevKey=!officialVision;tab=4 }, modifier = Modifier.fillMaxWidth()) {
-                                        Text(if(officialVision) "填写 DeepSeek 官方 Key" else "填写 API Key")
-                                    }
-                                }
+                        // Every problem that stops or degrades skipping, compact on the first screen.
+                        if (healthIssues.isNotEmpty()) item(key = "health") {
+                            HealthBar(healthIssues, onAction = { issue -> when (issue.action) {
+                                HealthAction.ACCESSIBILITY_SETTINGS -> if (issue.id == "a11y_off") disclosure = true
+                                    else startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                                HealthAction.ENABLE_AUTO_SKIP -> repository.updateSettings { it.copy(enabled = true) }
+                                HealthAction.SELECT_APPS -> { onlySelectedApps = false; tab = 1 }
+                                HealthAction.API_KEY -> { focusVisionKey = officialVision; focusJevKey = !officialVision; tab = 4 }
+                                HealthAction.AI_SETTINGS -> tab = 4
+                                HealthAction.ENHANCED_TOUCH -> { intent.putExtra("configure_touch", true); tab = 4 }
+                                HealthAction.BATTERY -> runCatching { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                    android.net.Uri.parse("package:$packageName"))) }
+                                HealthAction.AD_JUMP, null -> Unit
+                            } }) { pkg ->
+                                adJumps.find { it.packageName == pkg }?.let { jump -> AdJumpCard(jump) { intent.putExtra("configure_touch", true); tab = 4 } }
                             }
                         }
                         item {
@@ -247,9 +256,6 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
-                        adJumps.filter {it.unread}.forEach {jump -> item(key="ad_jump_${jump.packageName}") {
-                            AdJumpCard(jump) {intent.putExtra("configure_touch",true);tab=4}
-                        } }
                         item {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 Stat("已验证", entries.count { it.verified }.toString(), Modifier.weight(1f)) { ruleFilter=RuleFilter.VERIFIED;tab=2 }

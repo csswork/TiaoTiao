@@ -303,7 +303,18 @@ class SkipAccessibilityService : AccessibilityService() {
             }
         }
     }
+    /** Health signals read by the dashboard: the last event of any kind, and the last screenshot failure. */
+    @Volatile var lastEventAt=0L
+        private set
+    @Volatile internal var captureFailure: Pair<Long,String>?=null
+    private var captureFailures=0
+    /** One timeout while a splash window disappears is normal; only repeated failures with no success are reported. */
+    internal fun noteCapture(failure: String?) {
+        if(failure==null) {captureFailures=0;captureFailure=null;return}
+        if(++captureFailures>=3) captureFailure=SystemClock.elapsedRealtime() to failure
+    }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        lastEventAt=SystemClock.elapsedRealtime()
         if (event == null || resettingResults || !repository.settings.value.enabled) return
         if((application as TiaoApplication).wirelessBootstrap.state.value.assisting) {
             stopDashboardScan()
@@ -921,6 +932,11 @@ class SkipAccessibilityService : AccessibilityService() {
             args.firstOrNull {it.startsWith("probe-tap=")}?.let {probeTap(it.substringAfter('='));writer.println("Probe tap requested")}
             if("probe-result" in args) writer.println("probe=$probeResult")
             if("clear-ad-jumps" in args) {repository.adJumps.clear();writer.println("Cleared launch-ad jump records")}
+            args.firstOrNull {it.startsWith("bench-vision=")}?.substringAfter('=')?.toIntOrNull()?.coerceIn(1,3)?.let {repeats ->
+                scope.launch(Dispatchers.IO) {com.haibo.tiaotiao.network.VisionBench.run(java.io.File(filesDir,"bench"),repository,repeats)}
+                writer.println("Vision benchmark started ($repeats round)")
+            }
+            if("bench-status" in args) writer.println("bench=${com.haibo.tiaotiao.network.VisionBench.status}")
             args.firstOrNull {it.startsWith("enhanced-touch=")}?.substringAfter('=')?.let {value ->
                 repository.updateSettings {it.copy(enhancedTouch=value=="on")};writer.println("Enhanced touch preference set to $value")
             }

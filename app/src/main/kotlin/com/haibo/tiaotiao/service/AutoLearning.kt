@@ -124,10 +124,12 @@ class AutoLearning(private val service: SkipAccessibilityService,
             val reason=e.message?.takeIf { it.matches(Regex("截图不可用（\\d+）")) || it=="截图请求超时" || it=="窗口比例变化，暂不使用截图坐标" } ?: e.javaClass.simpleName
             if (stage!="error-$reason") repository.reportDetection(screen.packageName,"截图或端侧识别不可用：$reason；当前未执行点击")
             stage="error-$reason"
+            service.noteCapture(reason)
             return
         }
         frame.use {
             captures++
+            service.noteCapture(null)
             if (!open(gen,screen.packageName)) return
             if(service.diagnosticHeldPackage==screen.packageName) {stage="diagnostic-actions-held";return}
             val fresh = current() ?: return
