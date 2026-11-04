@@ -149,6 +149,7 @@ class SkipAccessibilityService : AccessibilityService() {
     }
     /** Newest activity class per selected app; unlike launchClasses it survives the app's session being replaced. */
     private val lastClass=mutableMapOf<String,String>()
+    internal fun launchStartedAt(pkg: String)=launchSession?.takeIf {it.second==pkg}?.third
     private fun sessionObserved(pkg: String) {
         if(pkg==packageName || pkg !in repository.settings.value.packages || launchSession?.first==gate.generation) return
         launchSession=Triple(gate.generation,pkg,SystemClock.elapsedRealtime());launchClasses.clear();jumpBackDone=false;launchAdSeen=false

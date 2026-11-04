@@ -41,6 +41,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
     private var baselineRequests=0
     private var nextBaselineAt=0L
     private var captures = 0
+    private var firstAdFrame = 0L
     private var stage = "idle"
     private var lastSignals = ""
     private val homeArea = Area(0f,.88f,1f,.98f)
@@ -75,7 +76,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
             adScene=null;adSeenAt=0;baselineDone=false
             baselineRule=null;baselineBefore=null;baselineReference="";baselineAfter=null
             baselineRequests=0;nextBaselineAt=0;baselineLastAdAt=0
-            captures=0;stage="starting";lastSignals="";pendingRule=null;gestureObservation=null
+            captures=0;firstAdFrame=0;stage="starting";lastSignals="";pendingRule=null;gestureObservation=null
         }
     }
     fun warmUp() = capture.warmUp()
@@ -143,6 +144,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
             }
             if(baselineDone || observeBaseline(frame)) return
             if (adSeenAt==0L && frame.signals.advertisement) adSeenAt=frame.at
+            if (firstAdFrame==0L && (frame.signals.advertisement || frame.signals.skips.isNotEmpty())) firstAdFrame=frame.at
             confirmLearnedControls(frame,screen)
             if(frame.signals.advertisement || frame.signals.skips.isNotEmpty()) service.noteLaunchAd(screen.packageName)
             val signals="ad=${frame.signals.advertisement},skip=${frame.signals.skips.size},home=${frame.signals.home},timer=${frame.signals.countdown}"
@@ -250,7 +252,9 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     repository.log(screen.packageName,"学到的控件不在当前画面，原位置也未见跳过文字，未点击")
                     return
                 }
+                val checkStarted=SystemClock.elapsedRealtime()
                 val unchanged=try {capture.targetUnchanged(frame,clickArea)} catch(c: CancellationException) {throw c} catch(_: Exception) {false}
+                val checkMs=SystemClock.elapsedRealtime()-checkStarted
                 if(!unchanged) {
                     app.touchJournal.record("PRECHECK","target_changed",screen.packageName,chosen.id,details=mapOf("comparison" to capture.lastTargetCheck))
                     gestureObservation=null
@@ -258,6 +262,10 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     return
                 }
                 attempts=true
+                // Timing trace (diagnostics tab): where the seconds between the launch window and the touch went.
+                val now=SystemClock.elapsedRealtime();val launched=service.launchStartedAt(screen.packageName)
+                repository.log(screen.packageName,"计时：窗口→检测 ${launched?.let {sessionStarted-it} ?: -1} ms，检测→首个广告帧 ${if(firstAdFrame>0) firstAdFrame-sessionStarted else -1} ms，"+
+                    "广告帧→点击 ${if(firstAdFrame>0) now-firstAdFrame else -1} ms（本帧截图 ${frame.shotMs}、OCR ${frame.ocrMs}、帧龄 ${checkStarted-frame.at}、点击前核对 $checkMs ms）")
                 val trace=service.claimTrace(screen.packageName)
                 pendingRule=chosen
                 tapAt=SystemClock.elapsedRealtime()

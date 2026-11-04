@@ -16,7 +16,7 @@ import kotlin.coroutines.resumeWithException
 import kotlin.math.abs
 
 class VisualFrame(val screen: ScreenSnapshot, val bitmap: Bitmap, var signals: VisualSignals,
-    val jpeg: ByteArray, val at: Long) : AutoCloseable {
+    val jpeg: ByteArray, val at: Long, val shotMs: Long=0, val ocrMs: Long=0) : AutoCloseable {
     private val targetHashes=mutableMapOf<Area,String>()
     fun patch(area: Area): String = patchFrom(bitmap,area)
     /** Learning sees the masked 720px JPEG. Match targets through that same preprocessing. */
@@ -140,6 +140,7 @@ class VisualCapture(private val service: AccessibilityService,private val overla
             ?: throw IllegalStateException("截图请求超时")
         // Window screenshots have a window-local origin even when their aspect ratio resembles
         // the display. Never stretch those coordinates over system bars or offset windows.
+        val requested=SystemClock.elapsedRealtime()
         val windowBitmap=take(display=true)
         val bitmap=if(abs(windowBitmap.width.toFloat()/windowBitmap.height-screen.width.toFloat()/screen.height)>=.015f) {
             windowBitmap.recycle();take(display=true)
@@ -210,7 +211,8 @@ class VisualCapture(private val service: AccessibilityService,private val overla
             }
             val jpeg = ByteArrayOutputStream().use { masked.compress(Bitmap.CompressFormat.JPEG,75,it); it.toByteArray() }
             masked.recycle()
-            VisualFrame(screen,bitmap,VisualSignals(ad,inlineTimer ?: nearbyTimer ?: edgeTimer,skips,home,explicitSkips),jpeg,capturedAt)
+            VisualFrame(screen,bitmap,VisualSignals(ad,inlineTimer ?: nearbyTimer ?: edgeTimer,skips,home,explicitSkips),jpeg,capturedAt,
+                capturedAt-requested,SystemClock.elapsedRealtime()-capturedAt)
         } catch (t: Throwable) { bitmap.recycle(); throw t }
         finally { ocrBitmap?.takeIf { it!==bitmap }?.recycle() }
     }
