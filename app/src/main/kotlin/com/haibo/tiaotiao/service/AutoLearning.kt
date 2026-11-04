@@ -203,7 +203,10 @@ class AutoLearning(private val service: SkipAccessibilityService,
             }
             // Active schemes already have proof. The immediate pre-touch display check below
             // supplies a second current frame; do not make cached actions wait for a third one.
-            if(rule?.tapMethod==TapMethod.GESTURE && !rule.active()) {
+            // A literal skip read at the target in this very frame is already rendered; the pre-touch recheck below
+            // supplies the second frame, so only unlabeled image targets wait for another capture.
+            if(rule?.tapMethod==TapMethod.GESTURE && !rule.active() &&
+                VisualPolicy.controlTarget(ocrTarget ?: rule.target,frame.signals.explicitSkips)==null) {
                 val area=ocrTarget ?: refined ?: nativeGeometry ?: rule.target
                 val previous=gestureObservation?.takeIf {it.first==rule.behavior()}
                 if(previous==null || VisualPolicy.controlTarget(previous.second,listOf(area))==null) {
@@ -374,7 +377,9 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     }
                     afterFrames.forEach { it.close() }
                 }
-            } else if (rule==null && !demo(screen) && !frame.signals.home && queued<4 && imageQueued<2 &&
+            } else if (rule==null && !demo(screen) && !frame.signals.home && queued<4 &&
+                // A frame with no ad badge, skip text or countdown gets one look; a second one only with such a hint.
+                imageQueued<(if(frame.signals.advertisement || frame.signals.skips.isNotEmpty() || frame.signals.countdown!=null) 2 else 1) &&
                 (frame.signals.advertisement || AdRecognition.candidates(screen).isNotEmpty() || frame.patch(Area(.1f,.15f,.9f,.8f)).count {it=='1'} in 4..60) &&
                 SystemClock.elapsedRealtime()>=nextLearnAt) {
                 // The first launch snapshot can precede the cached target's node/label. Give the

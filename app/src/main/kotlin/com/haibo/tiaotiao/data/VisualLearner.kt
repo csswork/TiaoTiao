@@ -47,6 +47,13 @@ class VisualLearner(context: Context, private val repository: AppRepository,
     private fun jev(provider: VisionProvider,model: String)=provider==VisionProvider.JEV_OFFICIAL || model==com.haibo.tiaotiao.network.JevImageProtocol.MODEL
     private val officialSources=listOf(VisionProvider.JEV_OFFICIAL,VisionProvider.DEEPSEEK_OFFICIAL).map {"${it.name}:${it.defaultModel}"}.toSet()
     private var lastReprobe=0L
+    private var lastWarm=0L
+    /** Called when a selected app starts: the ad appears a second or two later, by when the connection is ready. */
+    fun warm(pkg: String) {
+        if(!allowed(pkg) || System.currentTimeMillis()-lastWarm<20_000) return
+        lastWarm=System.currentTimeMillis()
+        repository.visionRoute()?.let {provider -> runCatching {client.warm(provider)}}
+    }
     /** A blocked provider (typically HTTP 451 while the proxy is off) is re-tested in the background every 5 minutes. */
     private fun reprobeBlocked() {
         if(!repository.visionConnection.value.blocksRequests() || System.currentTimeMillis()-lastReprobe<300_000) return

@@ -148,6 +148,7 @@ class SkipAccessibilityService : AccessibilityService() {
     private fun sessionObserved(pkg: String) {
         if(pkg==packageName || pkg !in repository.settings.value.packages || launchSession?.first==gate.generation) return
         launchSession=Triple(gate.generation,pkg,SystemClock.elapsedRealtime());launchClasses.clear();jumpBackDone=false;launchAdSeen=false
+        (application as TiaoApplication).visualLearner.warm(pkg)
         val touch=(application as TiaoApplication).enhancedTouch
         // Prevention needs the shell service; refusing the dialog afterwards (below) works without it.
         if(repository.adJumps.known(pkg) && repository.settings.value.enhancedTouch && touch.ownedReady) scope.launch {
@@ -935,6 +936,16 @@ class SkipAccessibilityService : AccessibilityService() {
             args.firstOrNull {it.startsWith("bench-vision=")}?.substringAfter('=')?.toIntOrNull()?.coerceIn(1,3)?.let {repeats ->
                 scope.launch(Dispatchers.IO) {com.haibo.tiaotiao.network.VisionBench.run(java.io.File(filesDir,"bench"),repository,repeats)}
                 writer.println("Vision benchmark started ($repeats round)")
+            }
+            args.firstOrNull {it.startsWith("bench-deepseek=")}?.substringAfter('=')?.split(',')?.filter {it.matches(Regex("\\d{3,4}-(base|new|ocr)"))}?.takeIf {it.isNotEmpty()}?.let {variants ->
+                scope.launch(Dispatchers.IO) {com.haibo.tiaotiao.network.VisionBench.runDeepSeek(java.io.File(filesDir,"bench"),repository,variants)}
+                writer.println("DeepSeek benchmark started: $variants")
+            }
+            args.firstOrNull {it.startsWith("vision-provider=")}?.substringAfter('=')?.let {name ->
+                runCatching {VisionProvider.valueOf(name)}.getOrNull()?.let {provider ->
+                    runCatching {repository.configureVision(provider,provider.defaultModel,"")}
+                        .onSuccess {writer.println("Vision provider set to $provider")}.onFailure {writer.println("Vision provider unchanged: ${it.message}")}
+                }
             }
             if("bench-status" in args) writer.println("bench=${com.haibo.tiaotiao.network.VisionBench.status}")
             args.firstOrNull {it.startsWith("enhanced-touch=")}?.substringAfter('=')?.let {value ->

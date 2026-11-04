@@ -36,8 +36,7 @@ internal class DirectSystemTouch private constructor(private val manager: Any,pr
         return try {
             attempted=true
             if(!send(MotionEvent.ACTION_DOWN)) {lastReason="down_rejected";return false}
-            SystemClock.sleep(pressMs/2)
-            if(!send(MotionEvent.ACTION_MOVE)) {lastReason="move_rejected";return false}
+            // No intermediate MOVE: a tap needs none, and a launch window replaced mid-press rejected it, voiding the tap.
             SystemClock.sleep((pressMs-(SystemClock.uptimeMillis()-down)).coerceAtLeast(0))
             val accepted=send(MotionEvent.ACTION_UP);released=accepted
             lastReason=if(accepted) "injected" else "up_rejected";accepted
