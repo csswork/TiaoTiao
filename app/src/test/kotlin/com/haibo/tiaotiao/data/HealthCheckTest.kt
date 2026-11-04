@@ -27,6 +27,11 @@ class HealthCheckTest {
         assertEquals(listOf("missing_key"),HealthCheck.evaluate(healthy.copy(cloudEnabled=false,missingKey="Jev API Key")).map {it.id})
         assertEquals(listOf("cloud_off"),HealthCheck.evaluate(healthy.copy(cloudEnabled=false)).map {it.id})
     }
+    @Test fun `a blocked provider with a configured fallback is informational`() {
+        assertEquals("ai_blocked",HealthCheck.evaluate(healthy.copy(blockingAiError="HTTP 451")).single().id)
+        val switched=HealthCheck.evaluate(healthy.copy(blockingAiError="HTTP 451",aiFallback="DeepSeek 官方直连")).single()
+        assertEquals("ai_fallback",switched.id);assertEquals(HealthLevel.INFO,switched.level)
+    }
     @Test fun `each self-jumping launch ad gets its own entry`() {
         val issues=HealthCheck.evaluate(healthy.copy(adJumps=listOf("a.b" to "甲","c.d" to "乙")))
         assertEquals(listOf("a.b","c.d"),issues.map {it.packageName})

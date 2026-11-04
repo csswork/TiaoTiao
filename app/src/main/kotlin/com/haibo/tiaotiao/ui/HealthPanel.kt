@@ -82,6 +82,7 @@ private fun accessibilityListed(context: Context): Boolean {
         autoSkip=settings.enabled,selectedApps=settings.packages.size,automaticLearning=settings.automaticLearning,
         cloudEnabled=settings.cloudEnabled,missingKey=missingKey,
         blockingAiError=vision.message.takeIf {vision.blocksRequests()},
+        aiFallback=repository.fallbackVision()?.displayName?.takeIf {vision.blocksRequests()},
         enhancedTouch=settings.enhancedTouch,enhancedReady=touch==TouchConnection.READY && app.enhancedTouch.ownedReady,
         enhancedPaired=wireless.paired,wirelessDebugging=wirelessOn,
         // Only worth raising when the service has actually been lost; otherwise most phones would always show it.

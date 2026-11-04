@@ -374,7 +374,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     }
                     afterFrames.forEach { it.close() }
                 }
-            } else if (rule==null && !demo(screen) && (!frame.signals.home || imageQueued==0) && queued<4 && imageQueued<2 &&
+            } else if (rule==null && !demo(screen) && !frame.signals.home && queued<4 && imageQueued<2 &&
                 (frame.signals.advertisement || AdRecognition.candidates(screen).isNotEmpty() || frame.patch(Area(.1f,.15f,.9f,.8f)).count {it=='1'} in 4..60) &&
                 SystemClock.elapsedRealtime()>=nextLearnAt) {
                 // The first launch snapshot can precede the cached target's node/label. Give the

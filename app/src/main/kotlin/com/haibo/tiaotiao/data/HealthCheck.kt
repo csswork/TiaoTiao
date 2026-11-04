@@ -22,6 +22,8 @@ data class HealthSnapshot(
     val missingKey: String?=null,
     /** A provider error that blocks every request until the configuration is saved or tested again. */
     val blockingAiError: String?=null,
+    /** The other official provider that requests are routed to while the selected one is blocked. */
+    val aiFallback: String?=null,
     val enhancedTouch: Boolean=false,
     val enhancedReady: Boolean=false,
     val enhancedPaired: Boolean=false,
@@ -54,7 +56,9 @@ object HealthCheck {
             "没有密钥时只能复用已学会的规则，新的开屏广告无法识别。",HealthAction.API_KEY,"填写密钥"))}
         if(s.missingKey==null && !s.cloudEnabled) add(HealthIssue("cloud_off",HealthLevel.INFO,"云端分析已关闭",
             "已学会的规则仍可使用，新的开屏广告不会再学习。",HealthAction.AI_SETTINGS,"打开设置"))
-        s.blockingAiError?.let {add(HealthIssue("ai_blocked",HealthLevel.WARNING,"AI 服务请求被拒绝",
+        s.blockingAiError?.let {add(if(s.aiFallback!=null) HealthIssue("ai_fallback",HealthLevel.INFO,"AI 服务已自动切换到 ${s.aiFallback}",
+            "$it。新识别暂时由 ${s.aiFallback} 处理；每 5 分钟自动重测，恢复后切回。",HealthAction.AI_SETTINGS,"查看设置")
+            else HealthIssue("ai_blocked",HealthLevel.WARNING,"AI 服务请求被拒绝",
             "$it。已暂停新的识别请求，网络或代理恢复后到设置中重新测试连接。",HealthAction.AI_SETTINGS,"重新测试"))}
         if(s.sdk<30 && s.automaticLearning) add(HealthIssue("old_android",HealthLevel.INFO,"智能识别需要 Android 11 及以上",
             "当前系统只能使用文字“跳过”规则，图片和图标类关闭按钮无法识别。"))

@@ -12,14 +12,14 @@ import java.util.concurrent.TimeUnit
 @Serializable data class VisualDecision(val advertisement: Boolean, val confidence: Double, val label: String = "none",
     val left: Float = 0f, val top: Float = 0f, val right: Float = 0f, val bottom: Float = 0f,
     @kotlinx.serialization.Transient val inputTokens: Long?=null,@kotlinx.serialization.Transient val elapsedMs: Long?=null) {
-    fun target(): Area? = Area(left,top,right,bottom).takeIf { advertisement && confidence.isFinite() && confidence in .9..1.0 &&
+    fun target(minConfidence: Double=.9): Area? = Area(left,top,right,bottom).takeIf { advertisement && confidence.isFinite() && confidence in minConfidence..1.0 &&
         label in setOf("skip","close_ad") && it.valid() && it.right-it.left <= .4 && it.bottom-it.top <= .18 }
 }
 @Serializable data class VisualVerdict(val normalHome: Boolean, val advertisementGone: Boolean, val landingPage: Boolean,
     val systemPrompt: Boolean, val confidence: Double,
     @kotlinx.serialization.Transient val inputTokens: Long?=null,@kotlinx.serialization.Transient val elapsedMs: Long?=null) {
-    fun certain() = confidence.isFinite() && confidence in .9..1.0
-    fun accepted() = normalHome && advertisementGone && !landingPage && !systemPrompt && certain()
+    fun certain(minConfidence: Double=.9) = confidence.isFinite() && confidence in minConfidence..1.0
+    fun accepted(minConfidence: Double=.9) = normalHome && advertisementGone && !landingPage && !systemPrompt && certain(minConfidence)
 }
 
 class VisualClient(private val client: OkHttpClient = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)

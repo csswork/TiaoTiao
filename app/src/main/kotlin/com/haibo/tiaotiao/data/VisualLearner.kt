@@ -37,10 +37,27 @@ class VisualLearner(context: Context, private val repository: AppRepository,
     }
     private fun selectedCloud(pkg: String) = repository.settings.value.let {it.enabled && it.automaticLearning && it.cloudEnabled && pkg in it.packages}
     fun nodeAllowed(pkg: String) = allowed(pkg) && repository.settings.value.visionProvider!=VisionProvider.DEEPSEEK_OFFICIAL
-    fun allowed(pkg: String) = selectedCloud(pkg) && repository.visionKeyAvailable() && !repository.visionConnection.value.blocksRequests()
+    fun allowed(pkg: String) = selectedCloud(pkg) && repository.visionRoute()!=null
+    /** Measured on 44 labeled launch screens: Jev located every skip control and never called a home page an ad, but
+     * reports 0.66–0.88 for real ads; DeepSeek reports 0.95–0.99 for everything, including one home-page miss. */
+    private fun minConfidence(provider: VisionProvider,model: String)=if(jev(provider,model)) .6 else .9
+    /** Jev's result reviews were right at 0.75–0.92 on real launches; the local "target still visible" and
+     * "screen changed" checks below still veto a home verdict on their own. */
+    private fun reviewConfidence(provider: VisionProvider?,model: String)=if(provider!=null && jev(provider,model)) .7 else .9
+    private fun jev(provider: VisionProvider,model: String)=provider==VisionProvider.JEV_OFFICIAL || model==com.haibo.tiaotiao.network.JevImageProtocol.MODEL
+    private val officialSources=listOf(VisionProvider.JEV_OFFICIAL,VisionProvider.DEEPSEEK_OFFICIAL).map {"${it.name}:${it.defaultModel}"}.toSet()
+    private var lastReprobe=0L
+    /** A blocked provider (typically HTTP 451 while the proxy is off) is re-tested in the background every 5 minutes. */
+    private fun reprobeBlocked() {
+        if(!repository.visionConnection.value.blocksRequests() || System.currentTimeMillis()-lastReprobe<300_000) return
+        lastReprobe=System.currentTimeMillis()
+        scope.launch {runCatching {com.haibo.tiaotiao.network.testVisionConnection(repository)}}
+    }
     fun matchesBackend(rule: VisualRule) = repository.settings.value.let {s -> rule.active() || rule.source==VisualExecution.LOCAL_SOURCE ||
         if(rule.nodeTarget!=null) nodeAllowed(rule.packageName) && rule.source=="jev:${s.jevProvider}:${s.model}"
         else rule.source=="${s.visionProvider.name}:${s.visionModel}" ||
+            // Proposals learned through the fallback provider stay usable after the selection recovers, and vice versa.
+            (rule.source in officialSources && s.visionProvider.name+":"+s.visionModel in officialSources) ||
             (s.visionProvider==VisionProvider.VERCEL_AI_GATEWAY && rule.source=="vercel:${s.visionModel}")}
     private fun cached(key: String) = System.currentTimeMillis()-finished.getLong(key,0)<finished.getLong("ttl-$key",600_000)
     private fun recoveryStamp(screen: ScreenSnapshot)=repository.visualRules.value.filter {AdRecognition.matchesScene(it,screen) && (it.state==VisualRuleState.PAUSED || it.awaitingLocalReview)}
@@ -114,6 +131,7 @@ class VisualLearner(context: Context, private val repository: AppRepository,
     }
     suspend fun enqueue(frame: VisualFrame): Boolean = withContext(Dispatchers.IO) { enqueueWorker(frame) }
     private fun enqueueWorker(frame: VisualFrame): Boolean {
+        reprobeBlocked()
         if (!allowed(frame.screen.packageName)) return false
         folder.listFiles().orEmpty().filter { it.extension=="json" && !jobs.containsKey(it.nameWithoutExtension) }.forEach { file ->
             val old=runCatching { ruleJson.decodeFromString<PendingImage>(file.readText()) }.getOrNull()
@@ -121,9 +139,11 @@ class VisualLearner(context: Context, private val repository: AppRepository,
                 File(folder,file.nameWithoutExtension+".jpg").delete();file.delete()
             }
         }
-        val model = repository.settings.value.visionModel
-        val provider=repository.settings.value.visionProvider
-        val key = digest("${AdRecognition.scene(frame.screen)}|${frame.patch(Area(.05f,.12f,.95f,.88f))}|${frame.signals.skips}|$provider|$model|${repository.settings.value.visionRevision}|${recoveryStamp(frame.screen)}")
+        val provider=repository.visionRoute() ?: return false
+        val model=repository.visionModel(provider)
+        // OCR boxes jitter between frames; a coarse grid keeps one screen from being sent again every capture.
+        val skips=frame.signals.skips.joinToString(";") {"${(it.left*25).toInt()},${(it.top*50).toInt()}"}
+        val key = digest("${AdRecognition.scene(frame.screen)}|${frame.patch(Area(.05f,.12f,.95f,.88f))}|$skips|$provider|$model|${repository.settings.value.visionRevision}|${recoveryStamp(frame.screen)}")
         if (jobs.containsKey(key) || cached(key) ||
             System.currentTimeMillis()<finished.getLong("retry-$key",0)) return false
         val records=folder.listFiles().orEmpty().filter { it.extension=="json" }.sortedBy { it.lastModified() }
@@ -141,17 +161,21 @@ class VisualLearner(context: Context, private val repository: AppRepository,
     private fun launch(p: PendingImage) {
         if (jobs.containsKey(p.key) || !File(folder,"${p.key}.jpg").exists()) return
         val config=repository.settings.value
+        var used: VisionProvider?=null
         val job = scope.launch(start=CoroutineStart.LAZY) {
             try { permits.withPermit {
                 if (!allowed(p.screen.packageName)) return@withPermit
                 val image = File(folder,"${p.key}.jpg").readBytes()
                 val started = System.nanoTime()
-                if(config.visionProvider!=p.provider || config.visionModel!=p.model) return@withPermit
-                val credential=repository.visionKey(config) ?: return@withPermit
-                val decision = client.recognize(image,credential,p.model,p.provider,p.signals)
-                decision.inputTokens?.let {repository.log(p.screen.packageName,"${p.model} 图片识别：${decision.elapsedMs} ms，输入 $it tokens")}
-                if (!allowed(p.screen.packageName) || !repository.sameVision(config)) return@withPermit
-                val area = decision.target()
+                // Routed at call time: a sample queued before a block goes to the fallback instead of waiting.
+                val provider=repository.visionRoute() ?: return@withPermit
+                val model=repository.visionModel(provider)
+                val credential=repository.routeKey(provider,config) ?: return@withPermit
+                used=provider
+                val decision = client.recognize(image,credential,model,provider,p.signals)
+                decision.inputTokens?.let {repository.log(p.screen.packageName,"${provider.displayName} 图片识别：${decision.elapsedMs} ms，输入 $it tokens")}
+                if (!allowed(p.screen.packageName) || !repository.sameVisionRevision(config)) return@withPermit
+                val area = decision.target(minConfidence(provider,model))
                 val elapsed = (System.nanoTime()-started)/1_000_000
                 if (area == null) {
                     repository.reportDetection(p.screen.packageName,"视觉 AI 未确认跳过目标（${elapsed} ms，广告=${decision.advertisement}，置信=${decision.confidence}），已缓存样本")
@@ -162,14 +186,15 @@ class VisualLearner(context: Context, private val repository: AppRepository,
                     val frame = VisualFrame(p.screen,bitmap,VisualSignals(false,null,emptyList(),false),image,0)
                     val hash = frame.use { it.patch(area) }
                     val rule = VisualRule(packageName=p.screen.packageName,versionCode=p.screen.versionCode,scene=AdRecognition.scene(p.screen),sceneVersion=2,
-                        target=area,targetHash=hash,label=decision.label,source="${p.provider.name}:${p.model}",createdAt=System.currentTimeMillis(),contextHash=p.contextHash,tapMethod=TapMethod.GESTURE)
+                        target=area,targetHash=hash,label=decision.label,source="${provider.name}:$model",createdAt=System.currentTimeMillis(),contextHash=p.contextHash,tapMethod=TapMethod.GESTURE)
                     val result=saveProposal(rule)
                     result.rule?.let {repository.savePreview(it,image,it.target,PreviewKind.RECOGNITION)}
                     repository.reportDetection(p.screen.packageName,"${result.message}（${elapsed} ms）")
                     bubble(p.screen.packageName,if(result.rule==null) "等待稍后重学" else "已学习关闭位置")
                 }
                 val contradicted=p.signals?.let {it.advertisement && it.skips.isNotEmpty()}==true
-                val ttl=if(area!=null) 600_000L else if(decision.confidence<.9 || contradicted) 700L else 15_000L
+                // Retry soon only when the model saw an ad but placed no usable control; a clear "no ad" holds for 15 s.
+                val ttl=if(area!=null) 600_000L else if(decision.advertisement || contradicted) 700L else 15_000L
                 finished.edit().putLong(p.key,System.currentTimeMillis()).putLong("ttl-${p.key}",ttl).remove("retry-${p.key}").apply()
                 if (area != null) {
                     File(folder,"${p.key}.json").delete();File(folder,"${p.key}.jpg").delete()
@@ -177,14 +202,19 @@ class VisualLearner(context: Context, private val repository: AppRepository,
             } }
             catch (c: CancellationException) { throw c }
             catch (e: Exception) {
-                repository.recordVisionFailure(config,e.message.orEmpty())
+                used?.let {provider ->
+                    repository.recordVisionFailure(config,e.message.orEmpty(),provider)
+                    if(e is java.io.IOException) repository.noteVisionNetworkFailure(provider)
+                }
+                // The selection failed and the other provider is configured: route this sample there right away.
+                val quick=used==config.visionProvider && repository.fallbackVision()!=null && repository.visionRoute()!=used
                 finished.edit().putLong("retry-${p.key}",System.currentTimeMillis()+30_000).apply()
                 val safe = e.message?.takeIf { it.matches(Regex("(?:Vercel 视觉|Jev 图片|DeepSeek 官方直连图片)请求失败（HTTP \\d{3}）")) ||
                     it.matches(Regex("视觉响应不完整（finish=[a-z_]+，chars=\\d+）")) } ?: "网络或响应结构错误（${e.javaClass.simpleName}）"
                 repository.reportDetection(p.screen.packageName,"视觉学习未完成：$safe；已缓存待重试")
                 val retry = p.copy(attempts=p.attempts+1)
                 File(folder,"${p.key}.json").writeText(ruleJson.encodeToString(retry))
-                if (retry.attempts < 3) scope.launch { delay(30_000); if (allowed(p.screen.packageName)) launch(retry) }
+                if (retry.attempts < 3) scope.launch { delay(if(quick) 0 else 30_000); if (allowed(p.screen.packageName)) launch(retry) }
             }
             finally { jobs.remove(p.key) }
         }
@@ -202,16 +232,18 @@ class VisualLearner(context: Context, private val repository: AppRepository,
         val key="baseline-$session"
         val job=scope.launch(start=CoroutineStart.LAZY) {
             try {permits.withPermit {
-                val config=repository.settings.value;val model=config.visionModel
+                val config=repository.settings.value
                 if(!matchesBackend(rule)) return@withPermit
-                val credential=repository.visionKey(config) ?: return@withPermit
-                val verdict=client.verify(images,credential,model,attempted=false,provider=config.visionProvider)
-                verdict.inputTokens?.let {repository.log(rule.packageName,"$model 自然结束复核：${verdict.elapsedMs} ms，输入 $it tokens")}
-                if(!allowed(rule.packageName) || !repository.sameVision(config)) return@withPermit
+                val provider=repository.visionRoute() ?: return@withPermit
+                val model=repository.visionModel(provider)
+                val credential=repository.routeKey(provider,config) ?: return@withPermit
+                val verdict=client.verify(images,credential,model,attempted=false,provider=provider)
+                verdict.inputTokens?.let {repository.log(rule.packageName,"${provider.displayName} 自然结束复核：${verdict.elapsedMs} ms，输入 $it tokens")}
+                if(!allowed(rule.packageName) || !repository.sameVisionRevision(config)) return@withPermit
                 synchronized(repository) {
                     val current=repository.visualRules.value.find {it.id==rule.id && it.behavior()==rule.behavior()} ?: return@synchronized
                     if(current.state==VisualRuleState.PAUSED) return@synchronized
-                    if(verdict.accepted()) {
+                    if(verdict.accepted(reviewConfidence(provider,model))) {
                         repository.recordVisualBaseline(current.behavior(),duration)
                         repository.reportDetection(rule.packageName,"AI 已确认自然结束，记录保守显示时长 ${duration} ms；下次自动验证关闭效果")
                     } else repository.reportDetection(rule.packageName,"AI 尚未确认自然结束，继续观察；不计为跳过成功")
@@ -227,39 +259,51 @@ class VisualLearner(context: Context, private val repository: AppRepository,
         visualChange: Boolean=true,originalTargetStillVisible: Boolean=false) {
         val config=repository.settings.value
         val key="verify-$session"
+        var used: VisionProvider?=null
         val job=scope.launch(start=CoroutineStart.LAZY) {
             try {
                 if (!allowed(rule.packageName) || !matchesBackend(rule)) return@launch
-                val model=config.visionModel
-                val credential=repository.visionKey(config) ?: return@launch
                 val verdict = permits.withPermit {
-                    if(!allowed(rule.packageName) || !repository.sameVision(config)) return@launch
-                    client.verify(images,credential,model,provider=config.visionProvider)
+                    if(!allowed(rule.packageName) || !repository.sameVisionRevision(config)) return@launch
+                    val provider=repository.visionRoute() ?: return@launch
+                    val credential=repository.routeKey(provider,config) ?: return@launch
+                    used=provider
+                    try {client.verify(images,credential,repository.visionModel(provider),provider=provider)}
+                    catch(c: CancellationException) {throw c}
+                    catch(e: Exception) {
+                        // One result review is worth a second provider: retry once on the fallback when the selection fails.
+                        repository.recordVisionFailure(config,e.message.orEmpty(),provider)
+                        if(e is java.io.IOException) repository.noteVisionNetworkFailure(provider)
+                        val fallback=repository.visionRoute()?.takeIf {it!=provider} ?: throw e
+                        used=fallback
+                        client.verify(images,repository.routeKey(fallback,config) ?: throw e,repository.visionModel(fallback),provider=fallback)
+                    }
                 }
-                verdict.inputTokens?.let {repository.log(rule.packageName,"$model 点击结果复核：${verdict.elapsedMs} ms，输入 $it tokens")}
+                verdict.inputTokens?.let {repository.log(rule.packageName,"${used?.displayName} 点击结果复核：${verdict.elapsedMs} ms，输入 $it tokens")}
                 repository.log(rule.packageName,"AI 结果复核：首页=${verdict.normalHome}，广告消失=${verdict.advertisementGone}，详情页=${verdict.landingPage}，系统提示=${verdict.systemPrompt}，置信=${verdict.confidence}，时序=$early")
-                if (!allowed(rule.packageName) || !repository.sameVision(config)) return@launch
-                if(!verdict.certain()) {
+                if (!allowed(rule.packageName) || !repository.sameVisionRevision(config)) return@launch
+                val minimum=reviewConfidence(used,used?.let {repository.visionModel(it)}.orEmpty())
+                if(!verdict.certain(minimum)) {
                     repository.reportDetection(rule.packageName,"AI 结果不确定，保留现有方案；不增加成功或失败次数")
                     return@launch
                 }
-                if(verdict.accepted() && originalTargetStillVisible) {
+                if(verdict.accepted(minimum) && originalTargetStillVisible) {
                     repository.reportDetection(rule.packageName,"原跳过按钮仍在，未计为成功；忽略 AI 首页误判")
                     return@launch
                 }
-                if(verdict.accepted() && !visualChange) {
+                if(verdict.accepted(minimum) && !visualChange) {
                     repository.reportDetection(rule.packageName,"前后画面未变化，未计为跳过成功；AI 首页判断不能单独作为依据")
                     return@launch
                 }
                 val updated = repository.updateVisual(rule.id,rule.behavior()) {current ->
                     if(current.state==VisualRuleState.PAUSED) null else
-                        VisualPolicy.record(current,session,early,verdict.accepted(),sameApp,System.currentTimeMillis(),basis)
-                            .copy(homeScene=homeScene,homeHash=if (verdict.accepted() && sameApp && homeHash.isNotEmpty()) homeHash else current.homeHash)
+                        VisualPolicy.record(current,session,early,verdict.accepted(minimum),sameApp,System.currentTimeMillis(),basis)
+                            .copy(homeScene=homeScene,homeHash=if (verdict.accepted(minimum) && sameApp && homeHash.isNotEmpty()) homeHash else current.homeHash)
                 } ?: return@launch
                 repository.reportDetection(rule.packageName,if (updated.active()) "AI 与时序检查通过，智能规则已自动启用" else updated.lastResult)
                 bubble(rule.packageName,if(updated.active()) "已验证跳过方案" else if(updated.state==VisualRuleState.PAUSED) "本轮未跳过，稍后自动重学" else "检查完成，继续学习")
             } catch(c: CancellationException) {throw c}
-            catch (e: Exception) {repository.recordVisionFailure(config,e.message.orEmpty());repository.reportDetection(rule.packageName,"自动结果检查未完成，未晋升为已验证规则")}
+            catch (e: Exception) {used?.let {repository.recordVisionFailure(config,e.message.orEmpty(),it)};repository.reportDetection(rule.packageName,"自动结果检查未完成，未晋升为已验证规则")}
             finally {jobs.remove(key)}
         }
         if(jobs.putIfAbsent(key,job)==null) job.start() else job.cancel()

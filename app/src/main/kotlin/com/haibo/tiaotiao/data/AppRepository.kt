@@ -165,7 +165,9 @@ class AppRepository(private val context: Context) {
             .let {if(it.state==ConnectionState.CHECKING) ModelConnection() else it}
     }.getOrDefault(ModelConnection()))
     val visionConnection=_visionConnection.asStateFlow()
-    @Synchronized fun recordVisionFailure(config: AppSettings,error: String) {
+    /** Only the selected provider's own failure blocks it; a failing fallback request leaves the selection's state alone. */
+    @Synchronized fun recordVisionFailure(config: AppSettings,error: String,provider: VisionProvider=config.visionProvider) {
+        if(provider!=config.visionProvider) return
         val code=Regex("HTTP (401|403|404|451)\\b").find(error)?.groupValues?.get(1) ?: return
         if(sameVision(config) && _visionConnection.value.state!=ConnectionState.CHECKING)
             saveVisionConnection(ModelConnection(ConnectionState.FAILED,"${config.visionProvider.displayName} 请求未通过（HTTP $code），请检查密钥或网络后重新测试",System.currentTimeMillis()))
@@ -225,6 +227,36 @@ class AppRepository(private val context: Context) {
         VisionProvider.DEEPSEEK_OFFICIAL -> vault.contains("deepseekKey")
         VisionProvider.VERCEL_AI_GATEWAY -> s.jevProvider==JevProvider.VERCEL_AI_GATEWAY && vault.contains("jevKey")
     }}
+    /** A transient network failure of the selected provider routes requests to the other one for a minute. */
+    @Volatile private var primaryCooldownUntil=0L
+    fun noteVisionNetworkFailure(provider: VisionProvider) {
+        if(provider==settings.value.visionProvider && fallbackVision()!=null) primaryCooldownUntil=System.currentTimeMillis()+60_000
+    }
+    /** The other official image provider, when its own key is saved. Vercel has no counterpart. */
+    fun fallbackVision(): VisionProvider? = settings.value.let {s -> when(s.visionProvider) {
+        VisionProvider.JEV_OFFICIAL -> VisionProvider.DEEPSEEK_OFFICIAL.takeIf {vault.contains("deepseekKey")}
+        VisionProvider.DEEPSEEK_OFFICIAL -> VisionProvider.JEV_OFFICIAL.takeIf {s.jevProvider==JevProvider.TYPE_SAFE && vault.contains("jevKey")}
+        VisionProvider.VERCEL_AI_GATEWAY -> null
+    }}
+    /** Provider to call now: the selection, or the fallback while the selection is blocked (HTTP 451 without a proxy,
+     * a rejected key) or cooling down after a network failure. Null when neither can be used. */
+    fun visionRoute(): VisionProvider? {
+        val primaryUsable=visionKeyAvailable() && !_visionConnection.value.blocksRequests() && System.currentTimeMillis()>=primaryCooldownUntil
+        return if(primaryUsable) settings.value.visionProvider else fallbackVision() ?: settings.value.visionProvider.takeIf {
+            visionKeyAvailable() && !_visionConnection.value.blocksRequests()}
+    }
+    fun visionModel(provider: VisionProvider)=settings.value.let {if(provider==it.visionProvider) it.visionModel else provider.defaultModel}
+    fun sameVisionRevision(config: AppSettings)=settings.value.visionRevision==config.visionRevision
+    /** Key for a routed provider, under the same enable/cloud gates as visionKey. */
+    @Synchronized fun routeKey(provider: VisionProvider,config: AppSettings): String? {
+        val s=settings.value
+        if(!sameVisionRevision(config) || !s.enabled || !s.cloudEnabled || !s.automaticLearning) return null
+        return when(provider) {
+            VisionProvider.JEV_OFFICIAL -> if(s.jevProvider==JevProvider.TYPE_SAFE) vault.get("jevKey") else ""
+            VisionProvider.DEEPSEEK_OFFICIAL -> vault.get("deepseekKey")
+            VisionProvider.VERCEL_AI_GATEWAY -> if(s.visionProvider==provider && s.jevProvider==JevProvider.VERCEL_AI_GATEWAY) vault.get("jevKey") else ""
+        }.takeIf {it.isNotBlank()}
+    }
     fun sameVision(config: AppSettings) = settings.value.let {it.visionProvider==config.visionProvider &&
         it.visionModel==config.visionModel && it.visionRevision==config.visionRevision}
     @Synchronized fun visionKey(config: AppSettings,probe: Boolean=false): String? {
