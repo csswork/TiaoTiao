@@ -912,7 +912,7 @@ class SkipAccessibilityService : AccessibilityService() {
                 val app=application as TiaoApplication
                 val worker=app.visualLearner
                 worker.closeAndJoin()
-                withContext(Dispatchers.IO) {worker.clearPending();repository.clearResults()}
+                withContext(Dispatchers.IO) {worker.clearPending();repository.clearResults();app.skipStats.clear()}
                 app.visualLearner=com.haibo.tiaotiao.data.VisualLearner(this@SkipAccessibilityService,repository)
                 lastReadState="全部规则、验证证据、样本及学习缓存已清空；配置保留"
                 if(android.os.Build.VERSION.SDK_INT>=30) learning().warmUp()

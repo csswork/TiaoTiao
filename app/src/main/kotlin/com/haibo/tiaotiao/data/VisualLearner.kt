@@ -258,7 +258,7 @@ class VisualLearner(context: Context, private val repository: AppRepository,
         job.start();return true
     }
     fun verify(rule: VisualRule, session: String, images: List<ByteArray>, early: Boolean, sameApp: Boolean, homeScene: String, homeHash: String, basis: String,
-        visualChange: Boolean=true,originalTargetStillVisible: Boolean=false) {
+        visualChange: Boolean=true,originalTargetStillVisible: Boolean=false,localClosed: Boolean=false) {
         val config=repository.settings.value
         val key="verify-$session"
         var used: VisionProvider?=null
@@ -285,16 +285,28 @@ class VisualLearner(context: Context, private val repository: AppRepository,
                 repository.log(rule.packageName,"AI 结果复核：首页=${verdict.normalHome}，广告消失=${verdict.advertisementGone}，详情页=${verdict.landingPage}，系统提示=${verdict.systemPrompt}，置信=${verdict.confidence}，时序=$early")
                 if (!allowed(rule.packageName) || !repository.sameVisionRevision(config)) return@launch
                 val minimum=reviewConfidence(used,used?.let {repository.visionModel(it)}.orEmpty())
-                if(!verdict.certain(minimum)) {
-                    repository.reportDetection(rule.packageName,"AI 结果不确定，保留现有方案；不增加成功或失败次数")
+                val evidence=ReviewEvidence(verdict.certain(minimum),verdict.accepted(minimum),originalTargetStillVisible,visualChange,localClosed)
+                if(evidence.certain && !evidence.accepted && localClosed) {
+                    // The model contradicted a clearly closed screen (a lodging app's home reuses the ad's banner, so the
+                    // review called it a detail page every time). Count this launch on local evidence; two such launches
+                    // promote the rule like two agreed reviews, after which local checks replace the AI review.
+                    val updated=repository.updateVisual(rule.id,rule.behavior()) {current ->
+                        if(current.state==VisualRuleState.PAUSED) null else
+                            VisualPolicy.record(current,session,early,true,sameApp,System.currentTimeMillis(),basis,local=true)
+                                .copy(homeHash=homeHash.ifEmpty {current.homeHash})
+                    } ?: return@launch
+                    repository.reportDetection(rule.packageName,if(updated.active()) "本地证据两次确认广告已关闭，智能规则已启用（AI 判断有分歧）"
+                        else "AI 判断广告未关闭，但画面已进入应用首页且原跳过按钮消失；按本地证据记录（${updated.successfulSessions()}/2）")
                     return@launch
                 }
-                if(verdict.accepted(minimum) && originalTargetStillVisible) {
-                    repository.reportDetection(rule.packageName,"原跳过按钮仍在，未计为成功；忽略 AI 首页误判")
-                    return@launch
-                }
-                if(verdict.accepted(minimum) && !visualChange) {
-                    repository.reportDetection(rule.packageName,"前后画面未变化，未计为跳过成功；AI 首页判断不能单独作为依据")
+                if(evidence.outcome()==ReviewOutcome.IGNORED) {
+                    repository.reportDetection(rule.packageName,when {
+                        !evidence.certain -> "AI 结果不确定，保留现有方案；不增加成功或失败次数"
+                        evidence.accepted && originalTargetStillVisible -> "原跳过按钮仍在，未计为成功；忽略 AI 首页误判"
+                        evidence.accepted -> "前后画面未变化，未计为跳过成功；AI 首页判断不能单独作为依据"
+                        // Observed on a lodging app: the model called its search home a detail page and paused a working rule.
+                        else -> "AI 判断广告未关闭，但画面已进入应用首页且原跳过按钮消失；不计为失败，保留方案"
+                    })
                     return@launch
                 }
                 val updated = repository.updateVisual(rule.id,rule.behavior()) {current ->

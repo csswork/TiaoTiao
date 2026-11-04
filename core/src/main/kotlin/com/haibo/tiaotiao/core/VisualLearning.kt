@@ -6,7 +6,9 @@ import java.util.UUID
 @Serializable enum class VisualRuleState { CANDIDATE, ACTIVE, PAUSED }
 @Serializable enum class TapMethod { AUTO, ACCESSIBILITY, GESTURE }
 @Serializable data class AutoEvidence(val session: String, val behavior: String, val at: Long,
-    val earlyClick: Boolean, val normalHome: Boolean, val sameApplication: Boolean, val timingBasis: String = "countdown")
+    val earlyClick: Boolean, val normalHome: Boolean, val sameApplication: Boolean, val timingBasis: String = "countdown",
+    /** Recorded from on-device evidence while the AI review disagreed (see ReviewEvidence). */
+    val local: Boolean = false)
 @Serializable data class VisualConfirmation(val behavior: String,val at: Long)
 @Serializable data class VisualRule(
     val id: String = UUID.randomUUID().toString(), val packageName: String, val versionCode: Long,
@@ -39,6 +41,21 @@ import java.util.UUID
     val rules: List<VisualRule>)
 @Serializable data class VisualSignals(val advertisement: Boolean, val countdown: Int?, val skips: List<Area>, val home: Boolean,
     val explicitSkips: List<Area> = emptyList())
+
+enum class ReviewOutcome { SUCCESS, FAILURE, IGNORED }
+/** What one AI result review may change. Local observations can veto either direction: a model's "home" is not a
+ * success while the original skip control is still there or nothing changed, and its "not closed" is not a failure
+ * when both later frames show a changed screen with the app's bottom navigation, no ad badge and no original control. */
+data class ReviewEvidence(val certain: Boolean,val accepted: Boolean,val originalTargetVisible: Boolean,
+    val visualChange: Boolean,val localClosed: Boolean) {
+    fun outcome()=when {
+        !certain -> ReviewOutcome.IGNORED
+        accepted && (originalTargetVisible || !visualChange) -> ReviewOutcome.IGNORED
+        accepted -> ReviewOutcome.SUCCESS
+        localClosed -> ReviewOutcome.IGNORED
+        else -> ReviewOutcome.FAILURE
+    }
+}
 
 object VisualPolicy {
     const val MAX_RULES=500
@@ -160,14 +177,17 @@ object VisualPolicy {
         val informative = rule.targetHash.count { it=='1' } in 4..60 && patchHash.count { it=='1' } in 4..60
         return labelled || node || (rule.userAdjusted && context && signals.advertisement) || ((signals.advertisement || context) && patch && informative)
     }
-    fun record(rule: VisualRule, session: String, early: Boolean, home: Boolean, sameApp: Boolean, now: Long, timingBasis: String = "countdown"): VisualRule {
+    fun record(rule: VisualRule, session: String, early: Boolean, home: Boolean, sameApp: Boolean, now: Long, timingBasis: String = "countdown",
+        local: Boolean = false): VisualRule {
         if (!home || !sameApp) return pauseAutomatically(rule,"自动检查未通过，稍后自动重新识别",now)
         require(timingBasis in setOf("countdown","observed_baseline","explicit_label","unknown"))
-        val proof = AutoEvidence(session, rule.behavior(), now, early, home, sameApp,timingBasis)
+        val proof = AutoEvidence(session, rule.behavior(), now, early, home, sameApp,timingBasis,local)
         val next = rule.copy(evidence = (rule.evidence.filterNot { it.session == session } + proof).takeLast(20),
             automaticFailures = if (early) 0 else rule.automaticFailures)
         return next.copy(state = if (next.successfulSessions() >= 2 || next.manuallyConfirmed()) VisualRuleState.ACTIVE else VisualRuleState.CANDIDATE,
-            lastResult = if(next.manuallyConfirmed()) "用户确认仍有效，本次结果检查完成" else if (early) "自动检查通过（${next.successfulSessions()}/2）" else "页面已变化，时序证据不足，保留候选")
+            lastResult = if(next.manuallyConfirmed()) "用户确认仍有效，本次结果检查完成"
+                else if (early) (if(local) "本地检查通过，AI 判断有分歧（${next.successfulSessions()}/2）" else "自动检查通过（${next.successfulSessions()}/2）")
+                else "页面已变化，时序证据不足，保留候选")
     }
     fun decode(text: String): VisualBundle {
         require(text.toByteArray().size <= MAX_BYTES)

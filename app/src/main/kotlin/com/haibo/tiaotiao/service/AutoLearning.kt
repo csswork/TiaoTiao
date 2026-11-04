@@ -359,6 +359,8 @@ class AutoLearning(private val service: SkipAccessibilityService,
                         val homeScene=after2.screen.fingerprint().takeIf { after2.screen.complete && it!=screen.fingerprint() }.orEmpty()
                         app.visualLearner.verify(chosen,session,listOf(frame.jpeg,after1.jpeg,after2.jpeg),early,true,homeScene,homeHash,basis,
                             visualChange=frame.difference(after1)>.01 && frame.difference(after2)>.01,
+                            localClosed=frame.difference(after1)>.04 && frame.difference(after2)>.04 && (after1.signals.home || after2.signals.home) &&
+                                listOf(after1,after2).none {it.signals.advertisement || VisualPolicy.controlTarget(clickArea,it.signals.skips)!=null},
                             originalTargetStillVisible=listOf(after1,after2).any {VisualPolicy.controlTarget(clickArea,it.signals.explicitSkips)!=null})
                     } else {
                         if(chosen.active() && !chosen.manuallyConfirmed()) {
