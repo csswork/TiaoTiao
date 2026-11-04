@@ -32,9 +32,6 @@ class VisualLearner(context: Context, private val repository: AppRepository,
     private val client by lazy { visionFactory() }
     private val jev by lazy { jevFactory() }
     private val finished = context.getSharedPreferences("visual_cache",Context.MODE_PRIVATE)
-    private suspend fun bubble(pkg: String,text: String)=withContext(Dispatchers.Main.immediate) {
-        com.haibo.tiaotiao.service.SkipAccessibilityService.instance?.checkStatus(pkg,text,true)
-    }
     private fun selectedCloud(pkg: String) = repository.settings.value.let {it.enabled && it.automaticLearning && it.cloudEnabled && pkg in it.packages}
     fun nodeAllowed(pkg: String) = allowed(pkg) && repository.settings.value.visionProvider!=VisionProvider.DEEPSEEK_OFFICIAL
     fun allowed(pkg: String) = selectedCloud(pkg) && repository.visionRoute()!=null
@@ -186,7 +183,6 @@ class VisualLearner(context: Context, private val repository: AppRepository,
                 val elapsed = (System.nanoTime()-started)/1_000_000
                 if (area == null) {
                     repository.reportDetection(p.screen.packageName,"视觉 AI 未确认跳过目标（${elapsed} ms，广告=${decision.advertisement}，置信=${decision.confidence}），已缓存样本")
-                    bubble(p.screen.packageName,"未确认可跳过目标")
                 }
                 else {
                     val bitmap = requireNotNull(BitmapFactory.decodeByteArray(image,0,image.size))
@@ -197,7 +193,6 @@ class VisualLearner(context: Context, private val repository: AppRepository,
                     val result=saveProposal(rule)
                     result.rule?.let {repository.savePreview(it,image,it.target,PreviewKind.RECOGNITION)}
                     repository.reportDetection(p.screen.packageName,"${result.message}（${elapsed} ms）")
-                    bubble(p.screen.packageName,if(result.rule==null) "等待稍后重学" else "已学习关闭位置")
                 }
                 val contradicted=p.signals?.let {it.advertisement && it.skips.isNotEmpty()}==true
                 // Retry soon only when the model saw an ad but placed no usable control; a clear "no ad" holds for 15 s.
@@ -308,9 +303,8 @@ class VisualLearner(context: Context, private val repository: AppRepository,
                             .copy(homeScene=homeScene,homeHash=if (verdict.accepted(minimum) && sameApp && homeHash.isNotEmpty()) homeHash else current.homeHash)
                 } ?: return@launch
                 repository.reportDetection(rule.packageName,if (updated.active()) "AI 与时序检查通过，智能规则已自动启用" else updated.lastResult)
-                bubble(rule.packageName,if(updated.active()) "已验证跳过方案" else if(updated.state==VisualRuleState.PAUSED) "本轮未跳过，稍后自动重学" else "检查完成，继续学习")
             } catch(c: CancellationException) {throw c}
-            catch (e: Exception) {used?.let {repository.recordVisionFailure(config,e.message.orEmpty(),it)};repository.reportDetection(rule.packageName,"自动结果检查未完成，未晋升为已验证规则")}
+            catch (e: Exception) {used?.let {repository.recordVisionFailure(config,e.message.orEmpty(),it)};repository.reportDetection(rule.packageName,"自动结果检查未完成（${e.javaClass.simpleName}），未晋升为已验证规则")}
             finally {jobs.remove(key)}
         }
         if(jobs.putIfAbsent(key,job)==null) job.start() else job.cancel()

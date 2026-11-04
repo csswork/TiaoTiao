@@ -24,13 +24,14 @@ internal class DirectSystemTouch private constructor(private val manager: Any,pr
         val device=InputDevice.getDeviceIds().firstOrNull {id ->InputDevice.getDevice(id)?.supportsSource(InputDevice.SOURCE_TOUCHSCREEN)==true} ?: 0
         val pointer=MotionEvent.PointerProperties().apply {id=0;toolType=MotionEvent.TOOL_TYPE_FINGER}
         val down=SystemClock.uptimeMillis()
-        fun send(action: Int): Boolean {
+        // 1 = wait for the dispatch result, 0 = asynchronous. The touched window is fixed at DOWN.
+        fun send(action: Int,mode: Int=1): Boolean {
             val coordinates=MotionEvent.PointerCoords().apply {
                 this.x=x.toFloat();this.y=y.toFloat();pressure=if(action==MotionEvent.ACTION_UP || action==MotionEvent.ACTION_CANCEL) 0f else 1f;size=1f
             }
             val event=MotionEvent.obtain(down,SystemClock.uptimeMillis(),action,1,arrayOf(pointer),arrayOf(coordinates),
                 0,0,1f,1f,device,0,InputDevice.SOURCE_TOUCHSCREEN,0)
-            return try {display.invoke(event,0);inject.invoke(manager,event,1)==true} finally {event.recycle()}
+            return try {display.invoke(event,0);inject.invoke(manager,event,mode)==true} finally {event.recycle()}
         }
         var attempted=false;var released=false
         return try {
@@ -38,7 +39,8 @@ internal class DirectSystemTouch private constructor(private val manager: Any,pr
             if(!send(MotionEvent.ACTION_DOWN)) {lastReason="down_rejected";return false}
             // No intermediate MOVE: a tap needs none, and a launch window replaced mid-press rejected it, voiding the tap.
             SystemClock.sleep((pressMs-(SystemClock.uptimeMillis()-down)).coerceAtLeast(0))
-            val accepted=send(MotionEvent.ACTION_UP);released=accepted
+            // A launch window replaced mid-press made a waited UP fail and voided the tap; deliver it without waiting.
+            val accepted=send(MotionEvent.ACTION_UP,0);released=accepted
             lastReason=if(accepted) "injected" else "up_rejected";accepted
         } catch(error: Exception) {
             val cause=(error as? java.lang.reflect.InvocationTargetException)?.targetException ?: error

@@ -59,8 +59,6 @@ import com.haibo.tiaotiao.TiaoApplication
     LaunchedEffect(onlySelected, category, query) { listState.scrollToItem(0) }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-        Text(if (onlySelected) "已选择的应用" else "应用列表", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-        Text("选择要处理的应用，可按类别或名称查找。", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 10.dp))
         OutlinedTextField(value = query, onValueChange = { query = it }, label = { Text("搜索名称或包名") },
             leadingIcon = { QingIcon(QingGlyph.SEARCH,size=20.dp) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -71,12 +69,9 @@ import com.haibo.tiaotiao.TiaoApplication
                 trailingIcon = { QingIcon(QingGlyph.CHEVRON_DOWN,size=20.dp) },
                 modifier = Modifier.semantics { contentDescription = "类别：${category.title}" })
         }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("${filtered.size} 个应用", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-            if (hasFilters) TextButton(onClick = ::clearFilters) { Text("重置") }
-        }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(classification.message, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f), color = Color.Gray)
+            Text("${filtered.size} 个应用", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f), color = Color.Gray)
+            if (hasFilters) TextButton(onClick = ::clearFilters) { Text("重置") }
             if (!loading && !classification.running) {
                 if (classification.canClassify) TextButton(onClick = {
                     classifier.refresh(force = !classification.failed, retry = true)

@@ -50,9 +50,9 @@ class RuleUiFlowTest {
         waitUntil {classifier.state.value.apps.any {it.packageName==settings.packageName && it.category==AppCategory.TOOLS}}
         open()
         click("应用")
-        waitUntil {find("全部应用")!=null || find("已选择的应用")!=null}
-        if(find("已选择的应用")==null) click("已选择")
-        waitUntil {find("已选择的应用")!=null && find("处理 ${settings.name}")!=null}
+        waitUntil {find("搜索名称或包名")!=null}
+        click("已选择 ${repository.settings.value.packages.size}")
+        waitUntil {find("处理 ${settings.name}")!=null}
         click("类别：全部类别")
         waitUntil {find("按类别筛选")!=null}
         screenshot("ui-category-picker")
@@ -68,7 +68,7 @@ class RuleUiFlowTest {
         assertEquals(selected,repository.settings.value.packages)
         click("清除筛选")
         waitUntil {find("类别：全部类别")!=null && find("处理 ${settings.name}")!=null}
-        assertNotNull(find("已选择的应用"))
+        assertNotNull(find("已选择 ${selected.size}"))
         click("类别：全部类别")
         scrollTo("类别选项：${another.title}")
         click("类别选项：${another.title}")
@@ -138,17 +138,14 @@ class RuleUiFlowTest {
         repository.vault.set("jevKey","ui-test-not-a-real-key")
         try {
             open()
-            waitUntil {find("查看已验证列表")!=null}
+            waitUntil {find("查看已学会列表")!=null}
             assertNull("配置完成后 API 卡片不应占据首屏",find("AI 服务已配置"))
             screenshot("ui-home")
             exportBrandPreview()
-            scrollTo("AI 服务已配置")
-            screenshot("ui-api-footer")
             open()
-            waitUntil {find("查看已验证列表")!=null}
-            click("查看已验证列表")
-            waitUntil {find("已验证规则")!=null}
-            assertNotNull(find("已验证 2"))
+            waitUntil {find("查看已学会列表")!=null}
+            click("查看已学会列表")
+            waitUntil {find("已学会 2")!=null}
             assertNull(find("待试跳"))
             screenshot("ui-verified")
             click("查看点击位置与处理进度")
@@ -162,12 +159,11 @@ class RuleUiFlowTest {
             assertEquals("预览不得发起实际点击或模型请求",before,repository.logs.value.size)
             assertFalse(repository.settings.value.enabled)
             back()
-            waitUntil {find("已验证规则")!=null}
+            waitUntil {find("已学会 2")!=null}
             back()
-            waitUntil {find("查看待处理列表")!=null}
-            click("查看待处理列表")
-            waitUntil {find("待处理规则")!=null}
-            assertNotNull(find("待处理 2"))
+            waitUntil {find("查看学习中列表")!=null}
+            click("查看学习中列表")
+            waitUntil {find("学习中 2")!=null}
             assertNotNull(find("待试跳"))
             assertNotNull(find("自动学习中"))
             assertNotNull("同一关闭目标的不同样本只能显示一个待处理任务",find("已归集 3 个识别样本"))
@@ -181,16 +177,19 @@ class RuleUiFlowTest {
             click("删除方案")
             waitUntil {find("将删除此学习任务及其 3 个样本。")!=null}
             click("删除")
-            waitUntil {repository.visualRules.value.none {it.state==VisualRuleState.CANDIDATE} && find("待处理规则")!=null}
+            waitUntil {repository.visualRules.value.none {it.state==VisualRuleState.CANDIDATE} && find("暂无学习中的规则")!=null}
             assertTrue("删除待处理任务不能删除已验证方案",repository.visualRules.value.single().active())
             back()
             waitUntil {find("查看应用列表")!=null}
             click("查看应用列表")
-            waitUntil {find("已选择的应用")!=null && find("处理 Settings")!=null}
+            waitUntil {find("处理 Settings")!=null}
             screenshot("ui-selected-apps")
             repository.vault.set("jevKey","")
             open()
-            waitUntil {find("填写 API Key")!=null}
+            // The missing key now lives in the compact health bar; expand it to reach the action.
+            waitUntil {findDescriptionPrefix("展开 ")!=null}
+            requireNotNull(findDescriptionPrefix("展开 ")).performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            waitUntil {find("尚未填写 Jev API Key")!=null && find("填写密钥")!=null}
             screenshot("ui-missing-key")
         } finally {
             repository.vault.set("jevKey","")
@@ -263,7 +262,7 @@ class RuleUiFlowTest {
         val savedFile=repository.previews.file(oldAction)
         assertTrue(savedFile.exists())
         assertEquals(2,com.haibo.tiaotiao.data.VisualPreviewStore(context.filesDir).entries.value.size)
-        open();click("查看已验证列表");click("查看点击位置与处理进度")
+        open();click("查看已学会列表");click("查看点击位置与处理进度")
         click("调整点击位置")
         scrollTo("保存点击位置")
         assertNull("修改位置不应要求先展开",find("广告截图与点击位置"))
@@ -289,7 +288,7 @@ class RuleUiFlowTest {
         assertEquals("旧实际点击证据不应被编辑覆盖",oldAction,repository.previews.entries.value.first {it.kind==oldAction.kind})
         assertTrue(repository.previews.entries.value.any {it.ruleId==rule.id && it.kind==com.haibo.tiaotiao.data.PreviewKind.MANUAL})
         assertFalse(repository.settings.value.enabled)
-        open();click("查看待处理列表");click("查看点击位置与处理进度")
+        open();click("查看学习中列表");click("查看点击位置与处理进度")
         click("确认方案正确")
         waitUntil {repository.visualRules.value.single().active()}
         assertTrue(repository.visualRules.value.single().manuallyConfirmed())
@@ -313,7 +312,7 @@ class RuleUiFlowTest {
         val jpeg=try {bitmap.eraseColor(android.graphics.Color.rgb(40,80,65));java.io.ByteArrayOutputStream().use {bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG,80,it);it.toByteArray()}}
             finally {bitmap.recycle()}
         runBlocking {repository.savePreview(photographed,jpeg,area,com.haibo.tiaotiao.data.PreviewKind.ACTION)}
-        open();click("查看待处理列表");click("已归集 2 个识别样本")
+        open();click("查看学习中列表");click("已归集 2 个识别样本")
         waitUntil {find("广告实际截图")!=null && find("调整点击位置")!=null}
         assertNull("默认选择有实际截图的样本",find("这个旧样本没有原图，以下使用本任务最近广告截图作参考。"))
         assertNotNull(find("最近实际点击"))
@@ -328,7 +327,7 @@ class RuleUiFlowTest {
         assertEquals(photographed.contextHash,adjusted.contextHash)
         assertEquals(photographed,repository.visualRules.value.first {it.id==photographed.id})
         assertTrue(repository.previews.entries.value.any {it.ruleId==old.id && it.kind==com.haibo.tiaotiao.data.PreviewKind.MANUAL})
-        open();click("查看待处理列表");click("已归集 2 个识别样本")
+        open();click("查看学习中列表");click("已归集 2 个识别样本")
         waitUntil {find("手动调整后的方案位置")!=null}
         screenshot("ui-saved-manual-point")
     }
@@ -360,6 +359,16 @@ class RuleUiFlowTest {
         val root=automation.rootInActiveWindow ?: return null
         fun visit(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
             if(node.isVisibleToUser && (node.text?.toString()?.lines()?.contains(text)==true || node.contentDescription?.toString()?.lines()?.contains(text)==true)) return node
+            for(i in 0 until node.childCount) { node.getChild(i)?.let {visit(it)?.let {found -> return found}} }
+            return null
+        }
+        return visit(root)
+    }
+    private fun findDescriptionPrefix(prefix: String): AccessibilityNodeInfo? {
+        if(Build.VERSION.SDK_INT>=33) automation.clearCache()
+        val root=automation.rootInActiveWindow ?: return null
+        fun visit(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+            if(node.isVisibleToUser && node.contentDescription?.toString()?.startsWith(prefix)==true) return node
             for(i in 0 until node.childCount) { node.getChild(i)?.let {visit(it)?.let {found -> return found}} }
             return null
         }

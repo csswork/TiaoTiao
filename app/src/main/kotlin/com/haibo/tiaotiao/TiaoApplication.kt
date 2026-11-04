@@ -16,6 +16,7 @@ class TiaoApplication : Application() {
         private set
     val repository by lazy { AppRepository(this) }
     val appLabels by lazy { AppLabels(this) }
+    val skipStats by lazy { com.haibo.tiaotiao.data.SkipStats(this) }
     val appClassification by lazy { com.haibo.tiaotiao.data.AppClassification(this, repository) }
     val enhancedTouch by lazy {com.haibo.tiaotiao.touch.EnhancedTouch(this)}
     val touchJournal by lazy {com.haibo.tiaotiao.touch.TouchJournal(this)}

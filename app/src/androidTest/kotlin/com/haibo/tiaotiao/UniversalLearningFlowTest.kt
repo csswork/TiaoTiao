@@ -273,17 +273,18 @@ class UniversalLearningFlowTest {
             repository.configureVision(VisionProvider.JEV_OFFICIAL,"jev-latest","")
             repository.updateSettings {it.copy(showCheckBubble=true)}
             val bubbleShows=SkipAccessibilityService.instance!!.diagnosticBubbleShows
+            val skipsBefore=app.skipStats.tally.value.total
             open(beta,canvas=true,ignoreFirst=true)
-            await("检测时显示检查气泡") {SkipAccessibilityService.instance?.diagnosticBubbleVisible==true}
-            repository.updateSettings {it.copy(showCheckBubble=false)}
-            await("关闭气泡立即生效") {SkipAccessibilityService.instance?.diagnosticBubbleVisible==false}
             await("首次触控未生效后重新校准补点") {clicks(beta)==10}
             assertEquals("1",shell("run-as $beta cat files/ignored_touch").trim())
             await("官方 Jev 复核完成") {repository.visualRules.value.any {it.source=="JEV_OFFICIAL:jev-latest" && it.evidence.isNotEmpty()}}
             assertTrue(repository.logs.value.any {"补充一次短点" in it.message})
             assertTrue("第一次不确定后应在同一会话重新识别",uncertainJevImages.get()>=2)
             assertTrue(directJevImages.get()>=3)
-            assertEquals("每个启动只显示一次提示，阶段变化不再弹出",bubbleShows+1,SkipAccessibilityService.instance!!.diagnosticBubbleShows)
+            // The bubble no longer appears on launch; at most once, and only when the ad was seen to close.
+            val announced=app.skipStats.tally.value.total-skipsBefore
+            assertTrue(announced in 0..1)
+            assertEquals("只在确认跳过时提示一次，打开应用不提示",bubbleShows+announced,SkipAccessibilityService.instance!!.diagnosticBubbleShows)
             val directRule=repository.visualRules.value.first {it.source=="JEV_OFFICIAL:jev-latest" && it.evidence.isNotEmpty()}
             assertTrue(repository.previews.entries.value.any {it.ruleId==directRule.id && it.kind==com.haibo.tiaotiao.data.PreviewKind.RECOGNITION})
             assertTrue(repository.previews.entries.value.any {it.ruleId==directRule.id && it.kind==com.haibo.tiaotiao.data.PreviewKind.ACTION})

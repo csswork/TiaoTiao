@@ -81,6 +81,9 @@ class MainActivity : ComponentActivity() {
         val currentConnection=visionConnection
         val detection by repository.detection.collectAsStateWithLifecycle()
         val adJumps by repository.adJumps.items.collectAsStateWithLifecycle()
+        val skipStats = (application as TiaoApplication).skipStats
+        val tally by skipStats.tally.collectAsStateWithLifecycle()
+        LaunchedEffect(Unit) { skipStats.refresh() }
         val scope = rememberCoroutineScope()
         val snackbar = remember { SnackbarHostState() }
         var tab by rememberSaveable { mutableIntStateOf(if(intent.getBooleanExtra("configure_vision",false) || intent.getBooleanExtra("configure_touch",false)) 4 else 0) }
@@ -174,8 +177,8 @@ class MainActivity : ComponentActivity() {
                 }
             },
                 title = { Column {
-                Text(if(selectedRuleKey!=null) "规则详情" else "TiaoTiao", fontWeight = FontWeight.Bold)
-                Text(if(selectedRuleKey!=null) "点击位置与处理进度" else "让等待少一点", style = MaterialTheme.typography.labelMedium, color = Pine)
+                Text(if(selectedRuleKey!=null) "规则详情" else listOf("TiaoTiao","应用","规则","记录","设置")[tab], fontWeight = FontWeight.Bold)
+                if(selectedRuleKey==null && tab==0) Text("让等待少一点", style = MaterialTheme.typography.labelMedium, color = Pine)
             } }, colors = TopAppBarDefaults.topAppBarColors(containerColor = Cream)) },
             bottomBar = { if(selectedRuleKey==null) NavigationBar(containerColor = Color.White) {
                 listOf("首页", "应用", "规则", "记录", "设置").forEachIndexed { index, title ->
@@ -221,7 +224,7 @@ class MainActivity : ComponentActivity() {
                         "已删除方案"
                     }})
                 else when (tab) {
-                    0 -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    0 -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         // Every problem that stops or degrades skipping, compact on the first screen.
                         if (healthIssues.isNotEmpty()) item(key = "health") {
                             HealthBar(healthIssues, onAction = { issue -> when (issue.action) {
@@ -239,71 +242,26 @@ class MainActivity : ComponentActivity() {
                                 adJumps.find { it.packageName == pkg }?.let { jump -> AdJumpCard(jump) { intent.putExtra("configure_touch", true); tab = 4 } }
                             }
                         }
-                        item {
-                            Card(colors = CardDefaults.cardColors(containerColor = Pine), shape = RoundedCornerShape(24.dp)) {
-                                Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    Text(when {
-                                        !connected -> "等待服务连接"
-                                        !settings.enabled -> "已暂停"
-                                        settings.cloudEnabled && (!hasVisionKey || currentConnection.state != ConnectionState.CONNECTED) -> "本地规则可用，模型待检查"
-                                        else -> "已准备好，轻松一点"
-                                    }, color = Color.White, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-                                    Text("已验证的界面，按规则自动跳过。\n新方案的学习与检查进度，随时可查。", color = Color(0xFFE1EEE4))
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text("自动跳过", color = Color.White, modifier = Modifier.weight(1f))
-                                        Switch(checked = settings.enabled, modifier = Modifier.semantics { contentDescription = "自动跳过" }, onCheckedChange = { repository.updateSettings { s -> s.copy(enabled = it) } })
-                                    }
-                                }
+                        item(key = "status") {
+                            StatusCard(when {
+                                !connected -> "检测已停止"
+                                !settings.enabled -> "已暂停"
+                                else -> "正在守护 ${settings.packages.size} 个应用"
+                            }, "今天跳过 ${tally.today} 次 · 累计 ${tally.total} 次", settings.enabled) {
+                                repository.updateSettings { s -> s.copy(enabled = it) }
                             }
                         }
-                        item {
+                        item(key = "stats") {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Stat("已验证", entries.count { it.verified }.toString(), Modifier.weight(1f)) { ruleFilter=RuleFilter.VERIFIED;tab=2 }
-                                Stat("待处理", entries.count { it.pending }.toString(), Modifier.weight(1f)) { ruleFilter=RuleFilter.PENDING;tab=2 }
+                                Stat("已学会", entries.count { it.verified }.toString(), Modifier.weight(1f)) { ruleFilter=RuleFilter.VERIFIED;tab=2 }
+                                Stat("学习中", entries.count { it.pending }.toString(), Modifier.weight(1f)) { ruleFilter=RuleFilter.PENDING;tab=2 }
                                 Stat("应用", settings.packages.size.toString(), Modifier.weight(1f)) { onlySelectedApps=true;tab=1 }
                             }
                         }
-                        detection?.let { latest -> item { SectionCard("最近处理") {
-                            Text(latest.message,style=MaterialTheme.typography.bodyMedium)
-                            TextButton(onClick={tab=3}) { Text("查看处理记录");Spacer(Modifier.width(4.dp));QingIcon(QingGlyph.CHEVRON_RIGHT,size=20.dp) }
-                        } } }
-                        item { SectionCard("通用自动学习") {
-                            Text(if(officialVision) "所有已选应用共用 DeepSeek 官方图片判断和端侧识别；方案缓存后自动尝试并检查结果。" else "所有已选应用共用：Jev 提前检查控件，OCR 与视觉识别补充图标；方案缓存后自动尝试并检查结果。")
-                            Row(verticalAlignment=Alignment.CenterVertically) {
-                                Text("智能学习",Modifier.weight(1f))
-                                Switch(checked=settings.automaticLearning,onCheckedChange={ repository.updateSettings { s -> s.copy(automaticLearning=it) } })
-                            }
-                            Text("智能规则：${visualRules.count { it.active() }} 条已启用，${entries.count { it.visual!=null && it.pending }} 个任务学习中",style=MaterialTheme.typography.bodySmall)
-                            OutlinedButton(onClick={
-                                if (!connected || !settings.enabled) notify("请先开启服务和自动跳过")
-                                else startActivity(Intent(this@MainActivity,SmartDemoActivity::class.java))
-                            }) { Text("智能视觉演示（无需确认）") }
-                        } }
-                        item { SectionCard("开始使用") {
-                            Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                                QingIcon(if(connected) QingGlyph.CHECK_CIRCLE else QingGlyph.PENDING_CIRCLE,size=20.dp,tint=Pine)
-                                Text(if (connected) "无障碍服务已连接" else "无障碍服务未连接", color = Pine)
-                            }
-                            Text("开启服务后，到「应用」选择需要处理的应用。小米系统如回收服务，可从这里重新开启。", style = MaterialTheme.typography.bodyMedium)
-                            Button(onClick = { disclosure = true }, modifier = Modifier.fillMaxWidth()) { Text("打开无障碍设置") }
-                            OutlinedButton(onClick = { onlySelectedApps=false;tab = 1 }, modifier = Modifier.fillMaxWidth()) { Text("选择应用") }
-                        } }
-                        item { SectionCard("先试一次，不用密钥") {
-                            Text("演示完整流程：试跳 → 人工确认 → 再次打开自动跳过。演示不会调用 Jev。")
-                            OutlinedButton(onClick = {
-                                if (!connected || !settings.enabled) notify("请先连接无障碍服务并开启自动跳过")
-                                else startActivity(Intent(this@MainActivity, DemoActivity::class.java))
-                            }, modifier = Modifier.fillMaxWidth()) { Text("打开模拟开屏") }
-                        } }
+                        item(key = "recent") { RecentSkips(tally.recent, onAll = { tab = 3 }) }
                         val awaiting = rules.filter { it.status == RuleStatus.TRIALLED }
                         if (awaiting.isNotEmpty()) item { Text("等待你确认结果", fontWeight = FontWeight.SemiBold) }
                         items(awaiting, key = { it.id }) { rule -> RuleSummary(RuleItem(ordinary=rule), { ruleFilter=RuleFilter.PENDING;tab=2;selectedRuleKey="ordinary-${rule.id}" }) }
-                        if (hasVisionKey) item(key="model_connection") { SectionCard("AI 服务已配置") {
-                            Text(currentConnection.message,color=if(currentConnection.state==ConnectionState.FAILED) Color(0xFF9C3B20) else Pine,style=MaterialTheme.typography.bodyMedium)
-                            Text("图片与结果复核：${settings.visionProvider.displayName} · ${settings.visionModel}\n应用分类：${settings.model}",style=MaterialTheme.typography.bodySmall)
-                            Text(if(settings.cloudEnabled) "${settings.visionProvider.displayName} · 云端分析已开启" else "云端分析已关闭，已验证规则仍可本地使用",style=MaterialTheme.typography.bodySmall)
-                            TextButton(onClick={focusJevKey=false;tab=4}) { Text("管理 API 配置");Spacer(Modifier.width(4.dp));QingIcon(QingGlyph.CHEVRON_RIGHT,size=20.dp) }
-                        } }
                     }
                     1 -> ApplicationsPage(repository,onlySelectedApps,{onlySelectedApps=it},onConfigure={focusJevKey=!hasJevKey;tab=4})
                     2 -> RuleListPage(entries,ruleFilter,{ruleFilter=it},{selectedRuleKey=it.key},
@@ -348,6 +306,7 @@ class MainActivity : ComponentActivity() {
         val settings by repository.settings.collectAsStateWithLifecycle()
         val connection by repository.modelConnection.collectAsStateWithLifecycle()
         val visionConnection by repository.visionConnection.collectAsStateWithLifecycle()
+        val connected by repository.connected.collectAsStateWithLifecycle()
         var model by remember(settings.model) { mutableStateOf(settings.model) }
         var provider by remember(settings.jevProvider) { mutableStateOf(settings.jevProvider) }
         var key by remember { mutableStateOf("") }
@@ -367,7 +326,7 @@ class MainActivity : ComponentActivity() {
         }
         LaunchedEffect(focusJevKey) {
             if (focusJevKey) {
-                listState.scrollToItem(1)
+                listState.scrollToItem(2)
                 withFrameNanos { }
                 keyFocusRequester.requestFocus()
                 keyboard?.show()
@@ -376,7 +335,7 @@ class MainActivity : ComponentActivity() {
         }
         LaunchedEffect(focusVisionKey) {
             if(focusVisionKey) {
-                listState.scrollToItem(2);withFrameNanos {}
+                listState.scrollToItem(1);withFrameNanos {}
                 if(visionProvider==VisionProvider.DEEPSEEK_OFFICIAL) {
                     visionKeyFocusRequester.requestFocus();keyboard?.show()
                 }
@@ -384,29 +343,49 @@ class MainActivity : ComponentActivity() {
             }
         }
         LazyColumn(Modifier.fillMaxSize().imePadding(), state = listState,
-            contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            item { Text("按你的方式运行", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold) }
-            item { SectionCard("云端分析与 Jev（可选）") {
-                Row(verticalAlignment=Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {Text("显示检查气泡");Text("检测时显示提示，关闭后仍在后台检查",style=MaterialTheme.typography.bodySmall)}
-                    Switch(checked=settings.showCheckBubble,onCheckedChange={value -> repository.updateSettings {it.copy(showCheckBubble=value)}},
-                        modifier=Modifier.semantics {contentDescription="显示检查气泡"})
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            item { SectionCard("运行") {
+                SettingSwitch("智能学习","遇到新的开屏广告时自动学习关闭位置",settings.automaticLearning) {value -> repository.updateSettings {it.copy(automaticLearning=value)}}
+                SettingSwitch("跳过成功时提示","确认广告已关闭时显示一次小气泡；打开应用时不打扰",settings.showCheckBubble) {value -> repository.updateSettings {it.copy(showCheckBubble=value)}}
+                SettingSwitch("允许云端分析","新广告的截图（文字已遮挡）发送给 AI 识别",settings.cloudEnabled) {value -> if (value) allowCloud() else repository.updateSettings {it.copy(cloudEnabled = false)}}
+            } }
+            item { SectionCard("AI 识别服务") {
+                Text("识别新的开屏广告并检查跳过结果。DeepSeek 国内直连、价格低；Jev 更快但需要代理。", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                    VisionProvider.entries.forEach {option -> FilterChip(selected=visionProvider==option,enabled=!busy,
+                        onClick={visionProvider=option;visionModel=option.defaultModel},label={Text(option.displayName)})}
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("允许云端分析", Modifier.weight(1f))
-                    Switch(checked = settings.cloudEnabled, modifier = Modifier.semantics { contentDescription = "允许云端分析" }, onCheckedChange = { if (it) allowCloud() else repository.updateSettings { s -> s.copy(cloudEnabled = false) } })
-                }
-                Text("选择密钥对应的接入服务", fontWeight = FontWeight.Medium)
+                Text("当前使用：${settings.visionProvider.displayName}",style=MaterialTheme.typography.bodySmall)
+                if(visionProvider==VisionProvider.DEEPSEEK_OFFICIAL) {
+                    OutlinedTextField(value=officialKey,onValueChange={officialKey=it},singleLine=true,
+                        label={Text(if(repository.vault.contains("deepseekKey")) "DeepSeek 官方 Key 已保存，留空保持" else "DeepSeek 官方 API Key")},
+                        visualTransformation=PasswordVisualTransformation(),keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Password),
+                        modifier=Modifier.fillMaxWidth().focusRequester(visionKeyFocusRequester))
+                } else Text(if(visionProvider==VisionProvider.JEV_OFFICIAL) "使用上方 TypeSafe 直连的 Jev Key，模型 jev-latest 跟随官方最新版本。" else "沿用上方已保存的 Vercel 网关 Key。",style=MaterialTheme.typography.bodySmall)
+                if(visionProvider==VisionProvider.VERCEL_AI_GATEWAY) OutlinedTextField(value=visionModel,onValueChange={visionModel=it},label={Text("视觉模型")},
+                    modifier=Modifier.fillMaxWidth(),singleLine=true)
+                Button(onClick={ task {
+                    repository.configureVision(visionProvider,visionModel.trim(),officialKey.trim())
+                    withContext(Dispatchers.Main) {officialKey="";focusManager.clearFocus();keyboard?.hide()}
+                    testVisionConnection(repository)
+                } },enabled=!busy) { Text("保存并测试图片") }
+                if(visionProvider==VisionProvider.DEEPSEEK_OFFICIAL) TextButton(onClick={task {
+                    repository.clearDeepseekKey();withContext(Dispatchers.Main) {officialKey=""};"已清除 DeepSeek 官方 Key，Jev 配置保留"
+                }},enabled=!busy) {Text("清除 DeepSeek Key")}
+                Text(visionConnection.message,style=MaterialTheme.typography.bodyMedium,
+                    color=if(visionConnection.state==ConnectionState.FAILED) Color(0xFF9C3B20) else Pine)
+            } }
+            item { SectionCard("Jev 接入（备用）") {
+                Text("Jev 需要代理才能访问；配置后，DeepSeek 不可用时自动改用 Jev。", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     JevProvider.entries.forEach { option -> FilterChip(
                         selected = provider == option, enabled = !busy,
                         onClick = { model = option.migrateModel(model); provider = option },
                         label = { Text(if (option == JevProvider.TYPE_SAFE) "TypeSafe 直连" else "Vercel 网关") }) }
                 }
-                Text("Vercel 密钥请选择 Vercel 网关；TypeSafe 密钥请选择直连。密钥在手机上加密保存，留空会沿用已保存的密钥。", style = MaterialTheme.typography.bodyMedium)
                 OutlinedTextField(value = key, onValueChange = { key = it }, label = { Text(if (hasJevKey) "API Key 已保存，留空保持" else "Jev API Key") }, singleLine = true,
                     visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().focusRequester(keyFocusRequester), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
-                OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("模型名称") },
+                if (provider != JevProvider.TYPE_SAFE) OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("模型名称") },
                     supportingText = { Text("建议使用 ${provider.defaultModel}") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(onClick = { task {
@@ -425,37 +404,15 @@ class MainActivity : ComponentActivity() {
                 }
                 Text(connection.message, style = MaterialTheme.typography.bodyMedium,
                     color = if (connection.state == ConnectionState.FAILED) Color(0xFF9C3B20) else Pine)
-                Text("连接测试会发送一条固定测试请求，不读取其他应用的内容。", style = MaterialTheme.typography.bodySmall)
-            } }
-            item { SectionCard("通用视觉学习模型") {
-                Text("选择图片识别和点击结果检查的服务。DeepSeek 官方直连独立使用官方 Key；Jev 配置保留，便于切换对照。")
-                FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                    VisionProvider.entries.forEach {option -> FilterChip(selected=visionProvider==option,enabled=!busy,
-                        onClick={visionProvider=option;visionModel=option.defaultModel},label={Text(option.displayName)})}
-                }
-                Text("当前使用：${settings.visionProvider.displayName} · ${settings.visionModel}",style=MaterialTheme.typography.bodySmall)
-                Text("待识别图片最多缓存 8 份，按 24 小时过期清理；识别和点击截图随方案保存在本机，可放大查看和调整位置。",style=MaterialTheme.typography.bodySmall)
-                if(visionProvider==VisionProvider.DEEPSEEK_OFFICIAL) {
-                    Text("官方接口：api.deepseek.com；填写你从 DeepSeek 官方获取的 Key。",style=MaterialTheme.typography.bodySmall)
-                    OutlinedTextField(value=officialKey,onValueChange={officialKey=it},singleLine=true,
-                        label={Text(if(repository.vault.contains("deepseekKey")) "DeepSeek 官方 Key 已保存，留空保持" else "DeepSeek 官方 API Key")},
-                        visualTransformation=PasswordVisualTransformation(),keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Password),
-                        modifier=Modifier.fillMaxWidth().focusRequester(visionKeyFocusRequester))
-                } else Text(if(visionProvider==VisionProvider.JEV_OFFICIAL) "使用上方 TypeSafe 直连的 Jev Key，模型 jev-latest 跟随官方最新版本。" else "沿用上方已保存的 Vercel 网关 Key。",style=MaterialTheme.typography.bodySmall)
-                OutlinedTextField(value=visionModel,onValueChange={visionModel=it},label={Text("视觉模型")},
-                    readOnly=visionProvider!=VisionProvider.VERCEL_AI_GATEWAY,modifier=Modifier.fillMaxWidth(),singleLine=true)
-                Button(onClick={ task {
-                    repository.configureVision(visionProvider,visionModel.trim(),officialKey.trim())
-                    withContext(Dispatchers.Main) {officialKey="";focusManager.clearFocus();keyboard?.hide()}
-                    testVisionConnection(repository)
-                } },enabled=!busy) { Text("保存并测试图片") }
-                if(visionProvider==VisionProvider.DEEPSEEK_OFFICIAL) TextButton(onClick={task {
-                    repository.clearDeepseekKey();withContext(Dispatchers.Main) {officialKey=""};"已清除 DeepSeek 官方 Key，Jev 配置保留"
-                }},enabled=!busy) {Text("清除 DeepSeek Key")}
-                Text(visionConnection.message,style=MaterialTheme.typography.bodyMedium)
-                Text("连接测试只发送固定测试图片，不读取其他应用内容。",style=MaterialTheme.typography.bodySmall)
             } }
             item { EnhancedTouchCard() }
+            item { SectionCard("演示") {
+                Text("不打开其他应用，体验一次识别与跳过。", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(onClick = { startActivity(Intent(this@MainActivity, SmartDemoActivity::class.java)) }, enabled = connected && settings.enabled) { Text("智能识别演示") }
+                    OutlinedButton(onClick = { startActivity(Intent(this@MainActivity, DemoActivity::class.java)) }, enabled = connected && settings.enabled) { Text("文字规则演示") }
+                }
+            } }
             item { SectionCard("规则同步 · 你的 HTTPS / WebDAV 空间") {
                 Text("填写一个可 GET / PUT 的 JSON 文件地址。手动同步本机已验证规则；更新远端需要服务器支持 ETag 条件写入。", style = MaterialTheme.typography.bodyMedium)
                 OutlinedTextField(value = url, onValueChange = { url = it }, label = { Text("https://…/tiaotiao-rules.json") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
@@ -481,7 +438,7 @@ class MainActivity : ComponentActivity() {
                 Text("普通规则保留筛选后的节点样本；智能学习另有少量遮挡图片缓存，识别成功或过期后清理。", style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = { task { repository.clearSamples(); (application as TiaoApplication).visualLearner.clearPending(); "已清空本地节点与视觉学习样本" } }, enabled = !busy) { Text("清空样本") }
             } }
-            item { Text("TiaoTiao 0.3.13 · 智能视觉试用需要 Android 11 及以上\n服务被系统关闭后，需在系统设置重新开启。", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
+            item { Text("TiaoTiao ${packageManager.getPackageInfo(packageName, 0).versionName} · 智能识别需要 Android 11 及以上", style = MaterialTheme.typography.bodySmall, color = Color.Gray) }
         }
     }
 }
@@ -492,6 +449,59 @@ class MainActivity : ComponentActivity() {
             Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             content()
         }
+    }
+}
+@Composable private fun SettingSwitch(title: String, detail: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+        }
+        Switch(checked = checked, onCheckedChange = onChange, modifier = Modifier.semantics { contentDescription = title })
+    }
+}
+@Composable private fun StatusCard(title: String, subtitle: String, enabled: Boolean, onToggle: (Boolean) -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = Pine), shape = RoundedCornerShape(24.dp)) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(title, color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Text(subtitle, color = Color(0xFFD5E8DA), style = MaterialTheme.typography.bodyMedium)
+            }
+            Switch(checked = enabled, onCheckedChange = onToggle, modifier = Modifier.semantics { contentDescription = "自动跳过" },
+                colors = SwitchDefaults.colors(checkedThumbColor = Pine, checkedTrackColor = Color(0xFFCFE6D6), checkedBorderColor = Color.Transparent))
+        }
+    }
+}
+/** The last few ads actually closed, by app and time; the diagnostic log stays on its own tab. */
+@Composable private fun RecentSkips(recent: List<com.haibo.tiaotiao.data.SkipEvent>, onAll: () -> Unit) {
+    val app = androidx.compose.ui.platform.LocalContext.current.applicationContext as TiaoApplication
+    val labels = remember { mutableStateMapOf<String, String>() }
+    val shown = recent.take(5)
+    LaunchedEffect(shown) { shown.forEach { labels[it.packageName] = app.appLabels.load(it.packageName) } }
+    SectionCard("最近跳过") {
+        if (shown.isEmpty()) Text("还没有跳过记录。打开已选择的应用时，TiaoTiao 会在后台处理开屏广告。",
+            style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
+        shown.forEach { event ->
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                QingIcon(QingGlyph.CHECK_CIRCLE, size = 18.dp, tint = Pine)
+                Text(labels[event.packageName] ?: app.appLabels.cached(event.packageName) ?: event.packageName,
+                    Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                Text(relativeTime(event.at), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+            }
+        }
+        TextButton(onClick = onAll, contentPadding = PaddingValues(0.dp)) { Text("查看全部记录"); Spacer(Modifier.width(4.dp)); QingIcon(QingGlyph.CHEVRON_RIGHT, size = 18.dp) }
+    }
+}
+internal fun relativeTime(at: Long, now: Long = System.currentTimeMillis()): String {
+    val zone = java.time.ZoneId.systemDefault()
+    val time = java.time.Instant.ofEpochMilli(at).atZone(zone)
+    val days = java.time.temporal.ChronoUnit.DAYS.between(time.toLocalDate(), java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate())
+    val clock = "%02d:%02d".format(time.hour, time.minute)
+    return when {
+        now - at < 60_000 -> "刚刚"
+        days == 0L -> clock
+        days == 1L -> "昨天 $clock"
+        else -> "%d月%d日".format(time.monthValue, time.dayOfMonth)
     }
 }
 @Composable private fun Stat(label: String, value: String, modifier: Modifier, onClick: () -> Unit) {

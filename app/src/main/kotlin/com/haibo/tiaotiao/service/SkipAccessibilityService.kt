@@ -50,16 +50,20 @@ class SkipAccessibilityService : AccessibilityService() {
     private val gate = SessionGate()
     private val checkBubble by lazy {CheckBubble(this,scope)}
     private var pairingAssistant: com.haibo.tiaotiao.touch.WirelessPairingAssistant?=null
-    private var bubbleSession: Pair<String,Long>?=null
+    private var announcedSession: Long?=null
     internal val diagnosticBubbleVisible get()=checkBubble.visible
     internal fun bubbleBounds()=checkBubble.bounds
     internal val diagnosticBubbleShows get()=checkBubble.shows
-    internal fun checkStatus(pkg: String,text: String,finished: Boolean=false) {
-        if(text!="正在检查" || finished) return
+    /** Called once an ad is seen to close after TiaoTiao's touch. Counts it, and shows one short bubble per launch —
+     * never merely because an app was opened. */
+    internal fun announceSkip(pkg: String) {
+        if(announcedSession==gate.generation) return
+        announcedSession=gate.generation
+        (application as TiaoApplication).skipStats.record(pkg)
+        repository.log(pkg,"已跳过开屏广告")
         if(!repository.settings.value.showCheckBubble || dashboardVisible() ||
-            !getSystemService(PowerManager::class.java).isInteractive || getSystemService(KeyguardManager::class.java).isKeyguardLocked ||
-            knownOwner?.second!=pkg) return
-        checkBubble.show("TiaoTiao 正在检查",1200)
+            !getSystemService(PowerManager::class.java).isInteractive || getSystemService(KeyguardManager::class.java).isKeyguardLocked) return
+        checkBubble.show("TiaoTiao 已跳过广告",1500)
     }
     private val jev by lazy { JevClient() }
     private var scanJob: Job? = null
@@ -266,7 +270,7 @@ class SkipAccessibilityService : AccessibilityService() {
     // The foreground package does not change across screen-off/unlock, but its hot-start splash is a new session.
     private val screenOff=object : BroadcastReceiver() {
         override fun onReceive(context: Context,intent: Intent) {
-            scanJob?.cancel();nodeRead?.cancel();gate.reset();hideOverlay();checkBubble.hide();bubbleSession=null
+            scanJob?.cancel();nodeRead?.cancel();gate.reset();hideOverlay();checkBubble.hide();announcedSession=null
             clearNodes();nextNodeRead=0
         }
     }
@@ -410,11 +414,10 @@ class SkipAccessibilityService : AccessibilityService() {
             }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { report(gate.packageName.orEmpty(), "error", "检测未完成，已结束本轮；可重新打开应用重试") }
-            finally {if(!gate.actionDispatched) targetEventPackage?.let {checkStatus(it,"本轮检查结束",true)}}
         }
     }
     fun restartSession() {
-        scanJob?.cancel(); gate.reset(); hideOverlay();checkBubble.hide();bubbleSession=null
+        scanJob?.cancel(); gate.reset(); hideOverlay();checkBubble.hide();announcedSession=null
         targetEventPackage = null; eventWindowId = null
         diagnosticPackage = null; reportedReasons.clear()
         clearNodes();cachedVersion=null;nextNodeRead=0
@@ -566,10 +569,6 @@ class SkipAccessibilityService : AccessibilityService() {
                 gate.observe(screen.packageName,now)
                 sessionObserved(screen.packageName)
                 if(!gate.isOpen(screen.packageName,now)) return
-                if(bubbleSession!=(screen.packageName to gate.generation)) {
-                    bubbleSession=screen.packageName to gate.generation
-                    checkStatus(screen.packageName,"正在检查")
-                }
                 report(screen.packageName,"begin",if(repository.settings.value.visionProvider==VisionProvider.DEEPSEEK_OFFICIAL)
                     "开屏检测已启动：DeepSeek 官方图片判断与端侧识别并行" else "开屏检测已启动：Jev 控件分析与端侧画面识别并行")
                 readNodes(screen)
@@ -846,7 +845,7 @@ class SkipAccessibilityService : AccessibilityService() {
                 if (gate.generation != generation || it.screen.packageName != rule.packageName) return@use
                 repository.reportDetection(rule.packageName, if (RuleEngine.locate(rule, it.screen) != null)
                     "规则命中，但点击后跳过目标仍存在；已停止重复点击，请反馈该规则"
-                    else "已发起规则点击，观察到页面发生变化")
+                    else "已发起规则点击，观察到页面发生变化".also {announceSkip(rule.packageName)})
             }
         }
     }
@@ -907,7 +906,7 @@ class SkipAccessibilityService : AccessibilityService() {
                 nodeRead?.cancelAndJoin();nodeRead=null
                 ownerProbe?.cancelAndJoin();ownerProbe=null
                 clearNodes();autoLearning?.close();autoLearning=null
-                gate.reset();hideOverlay();checkBubble.hide();bubbleSession=null;targetEventPackage=null;eventWindowId=null;knownOwner=null;ownerRevision++
+                gate.reset();hideOverlay();checkBubble.hide();announcedSession=null;targetEventPackage=null;eventWindowId=null;knownOwner=null;ownerRevision++
                 diagnosticPackage=null;reportedReasons.clear();targetEventAt=0
                 tracePackage=null;traceSnapshotPending=false;cachedVersion=null;nextNodeRead=0
                 val app=application as TiaoApplication

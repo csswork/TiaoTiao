@@ -19,8 +19,8 @@ import com.haibo.tiaotiao.TiaoApplication
 import kotlin.math.roundToInt
 
 internal enum class RuleFilter(val label: String, val title: String) {
-    ALL("全部", "规则库"), VERIFIED("已验证", "已验证规则"),
-    PENDING("待处理", "待处理规则"), PAUSED("已停用", "已停用规则")
+    ALL("全部", "规则库"), VERIFIED("已学会", "已学会规则"),
+    PENDING("学习中", "学习中规则"), PAUSED("已停用", "已停用规则")
 }
 
 internal data class RuleItem(val ordinary: SkipRule? = null, val visual: VisualRule? = null,
@@ -85,9 +85,7 @@ private fun position(area: Area): String {
     onSelect: (RuleItem) -> Unit, onImport: () -> Unit, onExport: () -> Unit, onShare: () -> Unit, busy: Boolean) {
     val filtered=remember(entries,filter) {entries.filter { it.matches(filter) }.sortedByDescending { it.createdAt }}
     val counts=remember(entries) {RuleFilter.entries.associateWith {option -> entries.count {it.matches(option)}}}
-    LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(20.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
-        item { Text(filter.title,style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.SemiBold) }
-        item { Text("查看每条方案会点击哪里，以及学习和验证进度。",style=MaterialTheme.typography.bodyMedium) }
+    LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(start=20.dp,end=20.dp,top=4.dp,bottom=20.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
         item {
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 RuleFilter.entries.forEach { option ->
@@ -98,7 +96,7 @@ private fun position(area: Area): String {
         if (filtered.isEmpty()) item {
             Column(Modifier.fillMaxWidth().padding(vertical=36.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(10.dp)) {
                 Text(when(filter) {
-                    RuleFilter.VERIFIED -> "还没有已验证的规则";RuleFilter.PENDING -> "暂无待处理规则"
+                    RuleFilter.VERIFIED -> "还没有学会的规则";RuleFilter.PENDING -> "暂无学习中的规则"
                     RuleFilter.PAUSED -> "暂无已停用规则";RuleFilter.ALL -> "规则库还是空的"
                 },style=MaterialTheme.typography.titleMedium)
                 Text(if(filter==RuleFilter.ALL || filter==RuleFilter.VERIFIED) "选好应用后，学习和验证结果会出现在这里。" else "新的处理进展会自动更新到这里。",style=MaterialTheme.typography.bodyMedium,color=Color.Gray)

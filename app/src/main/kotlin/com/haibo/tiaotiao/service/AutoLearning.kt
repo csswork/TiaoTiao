@@ -234,7 +234,6 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     baselineRule=rule;baselineBefore=frame.jpeg;baselineReference=frame.patch(Area(.05f,.12f,.95f,.88f))
                     baselineLastAdAt=frame.at
                     repository.reportDetection(screen.packageName,"本轮自动观察自然结束，不点击；即使首页有关闭标记也由 AI 检查")
-                    service.checkStatus(screen.packageName,"正在学习广告时长")
                     return // Observe one natural ending; do not infer causality from a disappearing page alone.
                 }
                 val chosen=rule
@@ -261,7 +260,6 @@ class AutoLearning(private val service: SkipAccessibilityService,
                 attempts=true
                 val trace=service.claimTrace(screen.packageName)
                 pendingRule=chosen
-                service.checkStatus(screen.packageName,"正在尝试跳过")
                 tapAt=SystemClock.elapsedRealtime()
                 if (!tap(gen,screen,clickArea,chosen,false)) {
                     pendingRule=null
@@ -269,10 +267,8 @@ class AutoLearning(private val service: SkipAccessibilityService,
                         com.haibo.tiaotiao.data.ExecutionTrace.save(service,chosen,clickArea,frame,emptyList(),actionSent=false)
                     }}
                     repository.reportDetection(screen.packageName,"智能点击未被接受或界面已变化，停止本轮")
-                    service.checkStatus(screen.packageName,"本轮未执行成功",true)
                     return
                 }
-                service.checkStatus(screen.packageName,"正在检查结果")
                 repository.savePreview(chosen,frame.jpeg,clickArea,com.haibo.tiaotiao.data.PreviewKind.ACTION,frame.patch(Area(.05f,.12f,.95f,.88f)))
                 var tapCount=1
                 var actualArea=clickArea
@@ -325,7 +321,6 @@ class AutoLearning(private val service: SkipAccessibilityService,
                         app.touchJournal.record("RESULT","no_result_frames",screen.packageName,chosen.id)
                         // Missing screenshots say nothing about whether the target itself works.
                         repository.reportDetection(screen.packageName,"点击后未取得两帧有效截图，本次不计为验证成功；保留方案")
-                        service.checkStatus(screen.packageName,"结果尚不明确，下次再检查",true)
                         return
                     }
                     val after1=afterFrames[0];val after2=afterFrames[1]
@@ -333,6 +328,8 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     val changed=changedStreak>=2 || (frame.difference(after1)>.04 && frame.difference(after2)>.04 &&
                         VisualPolicy.matchesHome(chosen,beforeHash,firstHash,secondHash))
                     repository.log(screen.packageName,"结果观察：方式=${chosen.tapMethod}，连续变化=$changed，末帧广告=${after2.signals.advertisement}，原位置关闭标记=${after2.signals.skips.any {it.near(clickArea)}}，首页=${after2.signals.home}")
+                    if(frame.difference(after1)>.04 && frame.difference(after2)>.04 && !after1.signals.advertisement && !after2.signals.advertisement &&
+                        listOf(after1,after2).none {VisualPolicy.controlTarget(clickArea,it.signals.skips)!=null}) service.announceSkip(screen.packageName)
                     val homeHash=VisualPolicy.homeTemplate(beforeHash,firstHash,secondHash)
                     val remaining=frame.signals.countdown?.times(1000L) ?: (baseline-(frame.at-adSeenAt))
                     // The first confirmed home frame establishes transition time; the second only
@@ -357,7 +354,6 @@ class AutoLearning(private val service: SkipAccessibilityService,
                             requestId=service.touchExecutions.lastOrNull {it.ruleId==chosen.id}?.requestId.orEmpty())
                         repository.reportDetection(screen.packageName,if(early) "智能规则本地复用及提前关闭检查通过，未请求云端模型"
                             else "已观察到广告结束，缺少提前关闭的时序证据；保留人工确认，不将自然结束记为点击成功")
-                        service.checkStatus(screen.packageName,"已完成跳过检查",true)
                     } else if (cloudReady) {
                         repository.reportDetection(screen.packageName,if(changed) "已观察到连续页面变化，AI 正在自动复核结果" else "本地结果不明确，AI 正在检查广告是否仍然存在")
                         val homeScene=after2.screen.fingerprint().takeIf { after2.screen.complete && it!=screen.fingerprint() }.orEmpty()
@@ -391,12 +387,12 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     VisualPolicy.canAttempt(paused.copy(state=VisualRuleState.CANDIDATE,awaitingLocalReview=false),screen,frame.signals,
                         if(paused.targetHash.count {it=='1'} in 4..60) frame.targetPatch(paused.target) else "",frame.patch(Area(.05f,.12f,.95f,.88f)))
                 }
-                if(waiting) {service.checkStatus(screen.packageName,"目标正在等待重新检查",true);return}
+                if(waiting) {return}
                 if(explicit==null && VisualExecution.singleControl(frame.signals.explicitSkips)!=null &&
                     SystemClock.elapsedRealtime()-sessionStarted<1600) return
                 inspectNodes(screen,gen,true)
                 if(queued>=4) return
-                if (app.visualLearner.enqueue(frame)) { queued++;imageQueued++;nextLearnAt=SystemClock.elapsedRealtime()+900;service.checkStatus(screen.packageName,"正在识别广告") }
+                if (app.visualLearner.enqueue(frame)) { queued++;imageQueued++;nextLearnAt=SystemClock.elapsedRealtime()+900}
             }
         }
     }
