@@ -30,6 +30,10 @@ class VisualRecoveryTest {
         assertNull(VisualPolicy.replaceProposal(stopped,rule,Long.MAX_VALUE-1))
         assertFalse(VisualPolicy.userPaused(stopped))
         VisualPolicy.validate(stopped)
+        assertTrue(VisualPolicy.stalled(stopped))
+        // A new app version starts over with a clean failure count; the same version stays stopped.
+        val updated=requireNotNull(VisualPolicy.replaceProposal(stopped,rule.copy(id="new",versionCode=2),2000))
+        assertEquals("saved",updated.id);assertEquals(0,updated.automaticFailures);assertFalse(VisualPolicy.stalled(updated))
         // The detail page's relearn/adjust reset these fields and resume learning.
         assertTrue(VisualPolicy.canRelearn(stopped.copy(state=VisualRuleState.CANDIDATE,retryAfter=0,automaticFailures=0),1000))
     }

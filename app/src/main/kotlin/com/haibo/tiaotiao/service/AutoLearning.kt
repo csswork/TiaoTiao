@@ -174,7 +174,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     target=explicit,targetHash=frame.targetPatch(explicit),contextHash=frame.patch(Area(.05f,.12f,.95f,.88f)),
                     label="skip",source=VisualExecution.LOCAL_SOURCE,createdAt=System.currentTimeMillis(),tapMethod=TapMethod.GESTURE)
                 val related=repository.visualRules.value.filter {VisualProposals.sameTarget(it,proposed)}
-                if(related.none {VisualPolicy.userPaused(it) || !VisualPolicy.canRelearn(it,System.currentTimeMillis())}) {
+                if(related.none {VisualPolicy.userPaused(it) || !VisualPolicy.canRelearn(it,System.currentTimeMillis(),screen.versionCode)}) {
                     val old=related.firstOrNull {VisualProposals.repeatedSample(it,proposed)}
                     val fresh=VisualPolicy.replaceProposal(old,proposed.copy(automaticFailures=related.maxOfOrNull {it.automaticFailures} ?: 0),System.currentTimeMillis())
                     if(fresh!=null) {
@@ -377,8 +377,14 @@ class AutoLearning(private val service: SkipAccessibilityService,
                     // Without a countdown or learned duration, a literal skip visible just before the touch and the screen
                     // changing within 2.5 s of that frame is the timing evidence; AI review of the frames is still required.
                     val explicitLabel=frame.signals.countdown==null && baseline<=0 && VisualPolicy.controlTarget(clickArea,frame.signals.explicitSkips)!=null
-                    val early=(remaining>=2000 && after1.at-frame.at<remaining-300) || (explicitLabel && after1.at-frame.at<2500)
-                    val basis=if (frame.signals.countdown!=null) "countdown" else if (baseline>0) "observed_baseline" else if (explicitLabel) "explicit_label" else "unknown"
+                    // An unlabeled icon without a countdown whose natural duration could not be measured in the allowed
+                    // observation launches would otherwise never earn timing proof. One touch, the control gone and the
+                    // screen changed for good within 1.5 s of it is the proof then; AI review of the frames still decides.
+                    val quickClose=frame.signals.countdown==null && baseline<=0 && !explicitLabel && tapCount==1 && !ignoredAfterTap && changed &&
+                        repository.baselineObservations(chosen.id)>=VisualPolicy.MAX_BASELINE_OBSERVATIONS && after1.at-tapAt<1500
+                    val early=(remaining>=2000 && after1.at-frame.at<remaining-300) || (explicitLabel && after1.at-frame.at<2500) || quickClose
+                    val basis=if (frame.signals.countdown!=null) "countdown" else if (baseline>0) "observed_baseline" else if (explicitLabel) "explicit_label"
+                        else if (quickClose) "quick_close" else "unknown"
                     app.touchJournal.record("RESULT",if(after2.signals.skips.any {it.near(clickArea)}) "ad_still_visible" else "result_unknown",
                         screen.packageName,chosen.id,requestId=service.touchExecutions.lastOrNull {it.ruleId==chosen.id}?.requestId.orEmpty(),details=mapOf(
                             "changed" to changed.toString(),"advertisement" to after2.signals.advertisement.toString(),"home" to after2.signals.home.toString(),
@@ -425,7 +431,7 @@ class AutoLearning(private val service: SkipAccessibilityService,
                 if(SystemClock.elapsedRealtime()-sessionStarted<1200 && repository.visualRules.value.any {
                     AdRecognition.matchesScene(it,screen) && it.state!=VisualRuleState.PAUSED && !it.awaitingLocalReview}) return
                 val waiting=repository.visualRules.value.filter {AdRecognition.matchesScene(it,screen) && it.state==VisualRuleState.PAUSED &&
-                    !VisualPolicy.canRelearn(it,System.currentTimeMillis())}.any {paused ->
+                    !VisualPolicy.canRelearn(it,System.currentTimeMillis(),screen.versionCode)}.any {paused ->
                     VisualPolicy.canAttempt(paused.copy(state=VisualRuleState.CANDIDATE,awaitingLocalReview=false),screen,frame.signals,
                         if(paused.targetHash.count {it=='1'} in 4..60) frame.targetPatch(paused.target) else "",frame.patch(Area(.05f,.12f,.95f,.88f)))
                 }

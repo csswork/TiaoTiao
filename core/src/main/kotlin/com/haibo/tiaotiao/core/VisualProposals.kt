@@ -9,8 +9,12 @@ data class VisualTask(val variants: List<VisualRule>) {
 }
 
 object VisualProposals {
-    fun sameTarget(a: VisualRule, b: VisualRule) = a.packageName == b.packageName &&
-        a.versionCode == b.versionCode && a.sceneVersion == b.sceneVersion && a.scene == b.scene &&
+    /** Same app and scene kind. A v2 scene digest embeds the app version, so digests of different versions cannot be
+     * compared; rules of one app learned on different versions are treated as the same scene (see
+     * AdRecognition.matchesScene), which is what lets a rule survive an app update instead of being duplicated. */
+    fun sameScene(a: VisualRule, b: VisualRule) = a.packageName == b.packageName && a.sceneVersion == b.sceneVersion &&
+        (a.scene == b.scene || (a.sceneVersion == 2 && a.versionCode != b.versionCode))
+    fun sameTarget(a: VisualRule, b: VisualRule) = sameScene(a,b) &&
         VisualPolicy.controlTarget(a.target,listOf(b.target))!=null
 
     private fun similarHash(a: String, b: String, tolerance: Int): Boolean {
@@ -25,7 +29,7 @@ object VisualProposals {
         if (!sameTarget(a, b) || a.tapMethod != b.tapMethod) return false
         val first = a.nodeTarget
         val second = b.nodeTarget
-        if (first != null && second != null) return a.nodeScene == b.nodeScene &&
+        if (first != null && second != null) return (a.nodeScene == b.nodeScene || a.versionCode != b.versionCode) &&
             first.path == second.path && first.resourceId == second.resourceId && first.className == second.className &&
             SignalText.canonical(first.label) == SignalText.canonical(second.label)
         if (first != null || second != null) return false

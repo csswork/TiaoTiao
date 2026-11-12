@@ -35,7 +35,14 @@ class EnhancedTouch(private val context: Context) {
     @Volatile private var service: ISystemTouch?=null
     @Volatile var lastEngine=""
         private set
+    /** The shell process is attached. Whether it can actually touch the screen is [state] == READY. */
     val ownedReady get()=service?.asBinder()?.pingBinder()==true
+    /** The one definition of "enhanced touch works now" for every screen and for the touch path. */
+    val usable get()=_state.value==TouchConnection.READY && ownedReady
+    /** The system refused an injected touch (e.g. MIUI without "USB 调试（安全设置）") although the shell holds the
+     * permission on paper. Sticky until a touch succeeds, the service re-attaches or the user re-checks. */
+    @Volatile private var injectDenied=false
+    fun allowRestart() {if(_health.value.reason=="stopped_by_user") _health.value=TouchHealth(checkedAt=System.currentTimeMillis())}
     init {
         scope.launch {journal.network.drop(1).collect {probe("network_change")}}
         scope.launch {while(isActive) {delay(30_000);if(ownedReady) probe("heartbeat")}}
@@ -72,6 +79,7 @@ class EnhancedTouch(private val context: Context) {
     }
     fun refresh() {_state.value=if(ownedReady) TouchConnection.READY else TouchConnection.STOPPED}
     suspend fun probe(trigger: String="manual")=probeLock.withLock {
+        if(trigger in setOf("attached","user_check")) injectDenied=false
         val target=service
         val old=_health.value
         val value=try {
@@ -79,8 +87,9 @@ class EnhancedTouch(private val context: Context) {
             else withContext(Dispatchers.IO) {
                 val status=target.status()
                 val uid=status.getInt("uid",-1);val permission=status.getString("permission","unknown")
-                TouchHealth(System.currentTimeMillis(),status.getInt("protocol")==2 && uid in setOf(0,2000) && permission!="denied",
-                    uid,status.getInt("pid",-1),permission,if(permission=="denied") "inject_permission_denied" else "service_responding")
+                val denied=permission=="denied" || injectDenied
+                TouchHealth(System.currentTimeMillis(),status.getInt("protocol")==2 && uid in setOf(0,2000) && !denied,
+                    uid,status.getInt("pid",-1),if(denied) "denied" else permission,if(denied) "inject_permission_denied" else "service_responding")
             }
         } catch(error: Exception) {TouchHealth(checkedAt=System.currentTimeMillis(),reason="probe_${error.javaClass.simpleName}")}
         if(service!==target) return@withLock
@@ -111,7 +120,13 @@ class EnhancedTouch(private val context: Context) {
                     "pressMs" to SystemTouchService.PRESS_MS.toString(),"elapsedMs" to report.getLong("elapsedMs").toString(),
                     "uid" to report.getInt("uid").toString(),"pid" to report.getInt("pid").toString()))
                 lastEngine=when(result) {1 -> "系统输入接口";2 -> "兼容系统命令";else -> "未完成"}
-                if(result in 1..2) TouchDispatch.COMPLETED else TouchDispatch.FAILED
+                if(result in 1..2) injectDenied=false
+                else if(reason=="inject_permission_denied") {
+                    injectDenied=true
+                    _health.value=_health.value.copy(checkedAt=System.currentTimeMillis(),available=false,permission="denied",reason=reason)
+                    handler.post {if(service===target) _state.value=TouchConnection.FAILED}
+                }
+                if(result in 1..2) TouchDispatch.COMPLETED else if(reason in touchNotSent) TouchDispatch.NOT_SENT else TouchDispatch.FAILED
             } catch(error: Exception) {
                 val reason="rpc_${error.javaClass.simpleName}"
                 _attempt.value=TouchAttempt(reason=reason,at=System.currentTimeMillis())

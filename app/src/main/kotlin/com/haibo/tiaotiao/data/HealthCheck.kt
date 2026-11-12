@@ -26,6 +26,8 @@ data class HealthSnapshot(
     val aiFallback: String?=null,
     val enhancedTouch: Boolean=false,
     val enhancedReady: Boolean=false,
+    /** The service is attached but the system refused its injected touch. */
+    val enhancedDenied: Boolean=false,
     val enhancedPaired: Boolean=false,
     val wirelessDebugging: Boolean=false,
     val batteryRestricted: Boolean=false,
@@ -71,7 +73,10 @@ object HealthCheck {
         if(!s.enhancedReady) s.touchRefusals.forEach {(pkg,label) -> add(HealthIssue("touch_refusal_$pkg",HealthLevel.WARNING,
             "「$label」会忽略无障碍点击","它会识别并拦截无障碍服务发出的点击，开屏广告只能等它自己结束。开启增强点击后可以自动跳过。",
             HealthAction.ENHANCED_TOUCH,if(s.enhancedTouch) "检查增强点击" else "开启增强点击",pkg))}
-        if(s.enhancedTouch && !s.enhancedReady) add(HealthIssue("enhanced",HealthLevel.INFO,
+        if(s.enhancedTouch && s.enhancedDenied) add(HealthIssue("enhanced_denied",HealthLevel.WARNING,"系统拒绝了增强点击",
+            "服务已连接，但系统不允许它点击屏幕，目前改用普通点击。小米/红米/POCO 请在开发者选项中开启“USB 调试（安全设置）”后重新检查。",
+            HealthAction.ENHANCED_TOUCH,"去处理"))
+        else if(s.enhancedTouch && !s.enhancedReady) add(HealthIssue("enhanced",HealthLevel.INFO,
             if(!s.enhancedPaired) "增强点击尚未配对" else if(!s.wirelessDebugging) "增强点击未运行：无线调试已关闭" else "增强点击未运行",
             "普通点击仍然可用；部分广告的跳转拦截和传感器暂停需要增强点击。",HealthAction.ENHANCED_TOUCH,"去处理"))
         if(s.batteryRestricted) add(HealthIssue("battery",HealthLevel.INFO,"后台运行可能受限",

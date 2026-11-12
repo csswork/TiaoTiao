@@ -73,7 +73,11 @@ object VisualPolicy {
     private fun binaryHash(value: String) = value.matches(Regex("[01]{64}"))
     private fun distance(a: String, b: String) = a.zip(b).count { it.first != it.second }
     fun userPaused(rule: VisualRule) = rule.state==VisualRuleState.PAUSED && rule.lastResult.startsWith("用户")
-    fun canRelearn(rule: VisualRule,now: Long) = !userPaused(rule) && (rule.state!=VisualRuleState.PAUSED || now>=rule.retryAfter)
+    /** Stopped for good after MAX_AUTOMATIC_FAILURES: only the user or a new app version starts it again. */
+    fun stalled(rule: VisualRule) = rule.state==VisualRuleState.PAUSED && !userPaused(rule) && rule.retryAfter==Long.MAX_VALUE
+    /** A new app version may have moved or fixed the control, so it gets a fresh start even after repeated failures. */
+    fun canRelearn(rule: VisualRule,now: Long,versionCode: Long=rule.versionCode) = !userPaused(rule) &&
+        (rule.state!=VisualRuleState.PAUSED || now>=rule.retryAfter || versionCode!=rule.versionCode)
     fun pauseAutomatically(rule: VisualRule,message: String,now: Long): VisualRule {
         if(userPaused(rule)) return rule
         val failures=(rule.automaticFailures+1).coerceAtMost(100)
@@ -89,9 +93,10 @@ object VisualPolicy {
     /** Fresh AI recognition is required to recover an automatically paused target. */
     fun replaceProposal(old: VisualRule?,incoming: VisualRule,now: Long): VisualRule? {
         if(old==null) return incoming
-        if(old.active() || !canRelearn(old,now)) return null
+        if(old.active() || !canRelearn(old,now,incoming.versionCode)) return null
         if(old.state!=VisualRuleState.PAUSED && !old.awaitingLocalReview) return null
-        return incoming.copy(id=old.id,automaticFailures=old.automaticFailures,retryAfter=0,learningRevision=old.learningRevision)
+        return incoming.copy(id=old.id,automaticFailures=if(incoming.versionCode!=old.versionCode) 0 else old.automaticFailures,
+            retryAfter=0,learningRevision=old.learningRevision)
     }
     /** OCR text may be much tighter than a model's button box; compare centres, not equal edges. */
     fun controlTarget(expected: Area, controls: List<Area>): Area? {
@@ -165,7 +170,7 @@ object VisualPolicy {
     fun canAttempt(rule: VisualRule, screen: ScreenSnapshot, signals: VisualSignals, patchHash: String, contextHash: String=""): Boolean {
         if (rule.state == VisualRuleState.PAUSED || rule.awaitingLocalReview ||
             (rule.sceneVersion==1 && !screen.complete) || !AdRecognition.matchesScene(rule,screen) || signals.home) return false
-        val node=rule.nodeTarget?.let { rule.nodeScene==AdRecognition.nodeScene(screen) && AdRecognition.matchesNode(it,screen) }==true
+        val node=rule.nodeTarget?.let { AdRecognition.matchesNodeScene(rule,screen) && AdRecognition.matchesNode(it,screen) }==true
         val context=binaryHash(rule.contextHash) && binaryHash(contextHash) &&
             rule.contextHash.count {it=='1'} in 4..60 && contextHash.count {it=='1'} in 4..60 && distance(rule.contextHash,contextHash)<=4
         // A Jev-confirmed structural scene can supply ad context for an unlabeled dismiss icon. A literal
@@ -180,7 +185,7 @@ object VisualPolicy {
     fun record(rule: VisualRule, session: String, early: Boolean, home: Boolean, sameApp: Boolean, now: Long, timingBasis: String = "countdown",
         local: Boolean = false): VisualRule {
         if (!home || !sameApp) return pauseAutomatically(rule,"自动检查未通过，稍后自动重新识别",now)
-        require(timingBasis in setOf("countdown","observed_baseline","explicit_label","unknown"))
+        require(timingBasis in setOf("countdown","observed_baseline","explicit_label","quick_close","unknown"))
         val proof = AutoEvidence(session, rule.behavior(), now, early, home, sameApp,timingBasis,local)
         val next = rule.copy(evidence = (rule.evidence.filterNot { it.session == session } + proof).takeLast(20),
             automaticFailures = if (early) 0 else rule.automaticFailures)

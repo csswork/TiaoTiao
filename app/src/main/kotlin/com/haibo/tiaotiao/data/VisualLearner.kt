@@ -112,7 +112,7 @@ class VisualLearner(context: Context, private val repository: AppRepository,
     }
     private data class ProposalResult(val rule: VisualRule?,val message: String)
     private fun saveProposal(rule: VisualRule): ProposalResult = synchronized(repository) {
-        val sceneRules=repository.visualRules.value.filter { it.packageName==rule.packageName && it.versionCode==rule.versionCode && it.scene==rule.scene }
+        val sceneRules=repository.visualRules.value.filter { VisualProposals.sameScene(it,rule) }
         if(sceneRules.any {VisualPolicy.userPaused(it) && VisualProposals.sameTarget(it,rule)}) return@synchronized ProposalResult(null,"目标已有用户停用记录，未保存新方案")
         val old=sceneRules.firstOrNull {VisualProposals.repeatedSample(it,rule) && (it.source==rule.source || it.awaitingLocalReview || it.active())}
         val replacement=VisualPolicy.replaceProposal(old,rule,System.currentTimeMillis())

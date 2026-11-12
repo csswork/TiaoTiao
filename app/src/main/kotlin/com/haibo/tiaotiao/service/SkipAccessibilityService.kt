@@ -158,7 +158,7 @@ class SkipAccessibilityService : AccessibilityService() {
         (application as TiaoApplication).visualLearner.warm(pkg)
         val touch=(application as TiaoApplication).enhancedTouch
         // Prevention needs the shell service; refusing the dialog afterwards (below) works without it.
-        if(repository.adJumps.known(pkg) && repository.settings.value.enhancedTouch && touch.ownedReady) scope.launch {
+        if(repository.adJumps.known(pkg) && repository.settings.value.enhancedTouch && touch.usable) scope.launch {
             if(touch.pauseSensors(pkg,SENSOR_PAUSE_MS)) repository.log(pkg,"此应用的开屏广告曾自行跳转，开屏 ${SENSOR_PAUSE_MS/1000} 秒内已暂停其传感器")
         }
     }
@@ -734,7 +734,7 @@ class SkipAccessibilityService : AccessibilityService() {
         selectedWindow(windows)?.takeIf {it.id==screen.windowId}?.getBoundsInScreen(bounds) ?: return reject("window_changed")
         if(!bounds.contains(pixelX,pixelY)) return reject("point_outside_window")
         val enhanced=(application as TiaoApplication).enhancedTouch
-        val useEnhanced=repository.settings.value.enhancedTouch && enhanced.state.value==com.haibo.tiaotiao.touch.TouchConnection.READY
+        val useEnhanced=repository.settings.value.enhancedTouch && enhanced.usable
         val recentNodes=nodeObservation?.takeIf {it.screen.packageName==fresh.packageName && it.screen.windowId==fresh.windowId &&
             SystemClock.elapsedRealtime()-nodeSnapshotAt<1500}
         val nativeTarget=VisualPolicy.nativeTarget(rule,if(fresh.complete) fresh else recentNodes?.screen ?: fresh,area)
@@ -779,6 +779,8 @@ class SkipAccessibilityService : AccessibilityService() {
         val result=routeTouch(useEnhanced,
             system={enhanced.tap(screen.packageName,pixelX,pixelY,screen.width,screen.height)},
             accessibility={dispatchTouch(pixelX,pixelY)})
+        if(useEnhanced && result.backend!="内置系统触控") repository.log(screen.packageName,
+            "增强点击未发出（${com.haibo.tiaotiao.touch.touchReason(enhanced.attempt.value.reason.ifEmpty {"service_unavailable"})}），已改用无障碍点击")
         val pressMs=if(result.backend=="内置系统触控") com.haibo.tiaotiao.touch.SystemTouchService.PRESS_MS else GESTURE_PRESS_MS
         val report=enhanced.attempt.value.takeIf {result.backend=="内置系统触控"}
         touchExecutions=(touchExecutions+com.haibo.tiaotiao.touch.TouchExecution(rule.id,result.backend,pixelX,pixelY,
@@ -900,7 +902,7 @@ class SkipAccessibilityService : AccessibilityService() {
         overlay = null; overlayRuleId = null; overlayIsResult = false
     }
     override fun onInterrupt() { scanJob?.cancel(); gate.reset(); hideOverlay();checkBubble.hide() }
-    private fun resetResults() {
+    internal fun resetResults() {
         if(resettingResults) return
         resettingResults=true
         scope.launch {
@@ -986,7 +988,7 @@ class SkipAccessibilityService : AccessibilityService() {
         writer.println("rules=${repository.rules.value.size}, visualRules=${repository.visualRules.value.size}, samples=${repository.sampleCount.value}, resetting=$resettingResults")
         writer.println("checkBubble=${checkBubble.visible}")
         writer.println("enhancedTouch=${repository.settings.value.enhancedTouch}, channel=${(application as TiaoApplication).enhancedTouch.state.value}")
-        writer.println("ownedTouch=${(application as TiaoApplication).enhancedTouch.ownedReady}")
+        writer.println("ownedTouch=${(application as TiaoApplication).enhancedTouch.ownedReady}, usable=${(application as TiaoApplication).enhancedTouch.usable}")
         writer.println("touchHealth=${(application as TiaoApplication).enhancedTouch.health.value}")
         writer.println("touchNetwork=${touchJournal.snapshot}, held=$diagnosticHeldPackage")
         touchExecutions.takeLast(4).forEach {writer.println("touchExecution=$it")}

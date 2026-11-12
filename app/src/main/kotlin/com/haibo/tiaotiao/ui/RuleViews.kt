@@ -30,12 +30,17 @@ internal data class RuleItem(val ordinary: SkipRule? = null, val visual: VisualR
     val target get() = ordinary?.target?.bounds ?: requireNotNull(visual).target
     val createdAt get() = ordinary?.createdAt ?: requireNotNull(visual).createdAt
     val verified = ordinary?.isVerified() ?: requireNotNull(visual).active()
+    /** Automatic checks failed too often; nothing happens until the user relearns, adjusts or the app updates. */
+    val stalled = visual?.let(VisualPolicy::stalled) == true
     val pending = ordinary?.let { it.status in setOf(RuleStatus.PENDING,RuleStatus.IMPORTED,RuleStatus.TRIALLED) }
-        ?: (!requireNotNull(visual).active() && !VisualPolicy.userPaused(visual))
+        ?: (!requireNotNull(visual).active() && !VisualPolicy.userPaused(visual) && !stalled)
     val paused = ordinary?.let { it.status == RuleStatus.DISABLED } ?: VisualPolicy.userPaused(requireNotNull(visual))
+    /** Why the scheme is where it is, for everything that is not simply working. */
+    val reason get() = if (verified) null else visual?.lastResult?.takeIf { it.isNotBlank() }
     val status = when {
         verified -> "已验证"
         paused -> "已停用"
+        stalled -> "已停止自动重试"
         visual?.state == VisualRuleState.PAUSED -> "等待自动重学"
         visual?.awaitingLocalReview == true -> "等待重新识别"
         visual != null -> "自动学习中"
@@ -44,7 +49,7 @@ internal data class RuleItem(val ordinary: SkipRule? = null, val visual: VisualR
     }
     val action get() = if (visual?.label == "close_ad") "关闭广告" else "跳过广告"
     fun matches(filter: RuleFilter) = when(filter) {
-        RuleFilter.ALL -> true; RuleFilter.VERIFIED -> verified; RuleFilter.PENDING -> pending; RuleFilter.PAUSED -> paused
+        RuleFilter.ALL -> true; RuleFilter.VERIFIED -> verified; RuleFilter.PENDING -> pending; RuleFilter.PAUSED -> paused || stalled
     }
 }
 
@@ -62,15 +67,16 @@ private fun position(area: Area): String {
     return if (horizontal=="中" && vertical=="中") "屏幕中央" else "屏幕${horizontal}${vertical}部"
 }
 
-@Composable internal fun RuleSummary(item: RuleItem, onClick: () -> Unit) {
+@Composable internal fun RuleSummary(item: RuleItem, onClick: () -> Unit, showApp: Boolean = true) {
     Card(onClick=onClick,modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(22.dp),
         colors=CardDefaults.cardColors(containerColor=Color.White)) {
         Row(Modifier.padding(16.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(16.dp)) {
             AdRuleThumbnail(item)
             Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                Text(appName(item.packageName),style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold)
+                Text(if(showApp) appName(item.packageName) else "${item.action} · ${position(item.target)}",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold)
                 Text(item.status,color=if(item.verified) Color(0xFF276751) else Color(0xFF776143),style=MaterialTheme.typography.labelLarge)
-                Text("${item.action} · ${position(item.target)}",style=MaterialTheme.typography.bodyMedium)
+                if(showApp) Text("${item.action} · ${position(item.target)}",style=MaterialTheme.typography.bodyMedium)
+                item.reason?.let {Text(it,style=MaterialTheme.typography.bodySmall,color=Color.Gray,maxLines=2)}
                 if(item.variants.size>1) Text("已归集 ${item.variants.size} 个识别样本",style=MaterialTheme.typography.bodySmall,color=Color.Gray)
                 Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(4.dp)) {
                     Text("查看点击位置与处理进度",style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.primary)
@@ -82,8 +88,15 @@ private fun position(area: Area): String {
 }
 
 @Composable internal fun RuleListPage(entries: List<RuleItem>, filter: RuleFilter, onFilter: (RuleFilter) -> Unit,
-    onSelect: (RuleItem) -> Unit, onImport: () -> Unit, onExport: () -> Unit, onShare: () -> Unit, busy: Boolean) {
-    val filtered=remember(entries,filter) {entries.filter { it.matches(filter) }.sortedByDescending { it.createdAt }}
+    onSelect: (RuleItem) -> Unit, onImport: () -> Unit, onExport: () -> Unit, onShare: () -> Unit, busy: Boolean,
+    onClearUnlearned: () -> Unit = {}, onClearAll: () -> Unit = {}) {
+    // One section per app, most recently active app first; inside it, working schemes before the rest.
+    val groups=remember(entries,filter) {entries.filter { it.matches(filter) }.groupBy { it.packageName }
+        .map { (pkg,items) -> pkg to items.sortedWith(compareByDescending<RuleItem> { it.verified }.thenByDescending { it.createdAt }) }
+        .sortedByDescending { (_,items) -> items.maxOf { it.createdAt } }}
+    val filtered=groups.flatMap { it.second }
+    val unlearned=remember(entries) {entries.count { !it.verified && !it.paused }}
+    var confirmClear by remember { mutableStateOf<String?>(null) }
     val counts=remember(entries) {RuleFilter.entries.associateWith {option -> entries.count {it.matches(option)}}}
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(start=20.dp,end=20.dp,top=4.dp,bottom=20.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
         item {
@@ -102,7 +115,15 @@ private fun position(area: Area): String {
                 Text(if(filter==RuleFilter.ALL || filter==RuleFilter.VERIFIED) "选好应用后，学习和验证结果会出现在这里。" else "新的处理进展会自动更新到这里。",style=MaterialTheme.typography.bodyMedium,color=Color.Gray)
             }
         }
-        items(filtered,key={it.key},contentType={"rule"}) { item -> RuleSummary(item,{ onSelect(item) }) }
+        groups.forEach { (pkg,items) ->
+            item(key="app-$pkg",contentType="app") {
+                Row(Modifier.fillMaxWidth().padding(top=6.dp),verticalAlignment=Alignment.CenterVertically) {
+                    Text(appName(pkg),Modifier.weight(1f),style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold,maxLines=1)
+                    Text("${items.size} 个方案 · 已学会 ${items.count { it.verified }}",style=MaterialTheme.typography.bodySmall,color=Color.Gray)
+                }
+            }
+            items(items,key={it.key},contentType={"rule"}) { item -> RuleSummary(item,{ onSelect(item) },showApp=false) }
+        }
         item {
             HorizontalDivider(Modifier.padding(top=8.dp,bottom=12.dp))
             Text("备份与分享",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold)
@@ -112,8 +133,21 @@ private fun position(area: Area): String {
                 OutlinedButton(onClick=onExport,enabled=!busy) { Text("导出") }
                 OutlinedButton(onClick=onShare,enabled=!busy) { Text("分享") }
             }
+            HorizontalDivider(Modifier.padding(top=16.dp,bottom=12.dp))
+            Text("清理",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold)
+            Text("清空后会在下次打开应用时重新学习。你手动停用的方案会保留，以免再次点错。",style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(vertical=8.dp))
+            Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick={confirmClear="unlearned"},enabled=!busy && unlearned>0) { Text("清空未学会 $unlearned") }
+                OutlinedButton(onClick={confirmClear="all"},enabled=!busy && entries.isNotEmpty()) { Text("清空全部") }
+            }
         }
     }
+    confirmClear?.let { kind -> AlertDialog(onDismissRequest={confirmClear=null},
+        title={Text(if(kind=="all") "清空全部学习结果？" else "清空 $unlearned 个未学会的方案？")},
+        text={Text(if(kind=="all") "将删除所有规则（包括已学会和已停用的）、截图、样本、跳过统计和记录，无法恢复。应用选择和密钥配置保留。"
+            else "将删除学习中和已停止自动重试的方案及其截图，无法恢复。已学会和你手动停用的方案保留。")},
+        confirmButton={TextButton(onClick={confirmClear=null;if(kind=="all") onClearAll() else onClearUnlearned()}) { Text("清空") }},
+        dismissButton={TextButton(onClick={confirmClear=null}) { Text("取消") }}) }
 }
 
 @Composable internal fun RuleDetailPage(task: RuleItem, busy: Boolean, onOpen: () -> Unit,
@@ -195,7 +229,7 @@ private fun position(area: Area): String {
                 }
                 if (item.visual!=null) Text("AI 会自动尝试和检查，你只需在发现异常时停用。",style=MaterialTheme.typography.bodyMedium)
                 if (!item.paused) OutlinedButton(onClick=onPause,enabled=!busy,modifier=Modifier.fillMaxWidth()) { Text(if(item.visual!=null) "点错了／停用方案" else "停用方案") }
-                if (item.visual!=null && item.paused) OutlinedButton(onClick=onRelearn,enabled=!busy,modifier=Modifier.fillMaxWidth()) { Text("重新学习") }
+                if (item.visual!=null && (item.paused || item.visual.state==VisualRuleState.PAUSED)) OutlinedButton(onClick=onRelearn,enabled=!busy,modifier=Modifier.fillMaxWidth()) { Text("重新学习") }
                 TextButton(onClick={confirmDelete=true},enabled=!busy) { Text("删除方案") }
             }
         }

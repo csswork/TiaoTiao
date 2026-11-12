@@ -71,6 +71,8 @@ class WirelessBootstrap(private val context: Context) {
         scope.launch {app.touchJournal.network.collect {if(it.wirelessAdb==1 && !app.enhancedTouch.ownedReady) scheduleRestart("网络变化")}}
         // Turning the preference back on should not require pressing "启动" again when a pairing is saved.
         scope.launch {app.repository.settings.map {it.enhancedTouch}.distinctUntilChanged().collect {
+            // Switching it on again is the user asking for it back, also after an explicit stop.
+            if(it) app.enhancedTouch.allowRestart()
             if(it && !app.enhancedTouch.ownedReady) scheduleRestart("已开启增强点击")
         }}
     }
@@ -80,18 +82,22 @@ class WirelessBootstrap(private val context: Context) {
     private fun scheduleRestart(trigger: String) {
         if(restart?.isActive==true || !canRestart()) return
         restart=scope.launch {
-            for(wait in listOf(2_000L,10_000L,30_000L)) {
-                delay(wait)
+            // Keep trying while wireless debugging stays on: three quick attempts, then every few minutes.
+            var attempt=0
+            while(isActive) {
+                delay(listOf(2_000L,10_000L,30_000L,60_000L,120_000L).getOrElse(attempt) {300_000L})
                 if(app.enhancedTouch.ownedReady || !canRestart()) return@launch
-                app.repository.log("","增强点击已断开（$trigger），正在用已保存的配对自动重新启动")
+                if(attempt++<3) app.repository.log("","增强点击已断开（$trigger），正在用已保存的配对自动重新启动（第 $attempt 次）")
                 // The connect port changes whenever adbd restarts; rediscover it rather than trusting the saved one.
                 _state.update {it.copy(connectPort=0)}
                 if(!connectDiscovery.isRunning) runCatching {connectDiscovery.start()}
                 startPaired(quiet=true)
                 operation?.join()
                 if(app.enhancedTouch.ownedReady) return@launch
+                // A fresh discovery next time: a still-running one does not report an unchanged service again.
+                stopDiscovery()
+                if(attempt==3) app.repository.log("","增强点击自动重启未成功：${_state.value.message}；无线调试开启期间会继续定时重试")
             }
-            stopDiscovery()
         }
     }
     fun beginAssistedPairing(): Boolean {
@@ -178,10 +184,26 @@ class WirelessBootstrap(private val context: Context) {
             catch(c: CancellationException) {throw c}
             catch(error: Exception) {
                 app.repository.log("","内置启动未完成：$startupStage / ${error.javaClass.simpleName}")
-                _state.update {it.copy(phase=WirelessPhase.FAILED,message="启动未完成，请开启无线调试；首次使用需先配对")}
+                _state.update {it.copy(phase=WirelessPhase.FAILED,message=failureMessage(error))}
             }
             finally {withContext(NonCancellable+Dispatchers.IO) {runCatching {client?.disconnect()}}}
         }}
+    }
+    /** Says which step failed and what fixes it, instead of one message for every cause. */
+    private fun failureMessage(error: Exception): String {
+        val wirelessOn=runCatching {Settings.Global.getInt(context.contentResolver,"adb_wifi_enabled",0)==1}.getOrDefault(false)
+        val name=error.javaClass.simpleName
+        return when {
+            !wirelessOn -> "无线调试未开启：请在开发者选项中打开“无线调试”（需要连接 Wi-Fi），开启后会自动启动"
+            startupStage=="发现本机连接端口" -> "未找到无线调试的连接端口：开着代理/VPN 时自动发现常会失败，可在下方填写无线调试页面显示的端口后再启动"
+            startupStage=="建立本机连接" && (name.contains("Pairing") || name.startsWith("SSL")) -> {
+                prefs.edit().putBoolean("paired",false).apply();_state.update {it.copy(paired=false)}
+                "本机拒绝了已保存的配对（可能已被系统撤销），请重新配对"
+            }
+            startupStage=="建立本机连接" -> "连不上本机无线调试端口：端口可能已变化，可在下方填写无线调试页面显示的端口；仍失败请重新配对"
+            startupStage=="等待内置服务就绪" -> "服务已启动但没有连回 TiaoTiao：请允许 TiaoTiao 自启动和后台运行后再启动"
+            else -> "启动未完成（$startupStage），请保持无线调试开启后重试"
+        }
     }
     fun timeout() {
         if(_state.value.phase!=WirelessPhase.READY) _state.update {it.copy(phase=WirelessPhase.FAILED,message="本次设置已结束，可重新开始配对或启动",assisting=false)}

@@ -27,6 +27,7 @@ class AdJumps(context: Context) {
     @Synchronized fun dismiss(packageName: String) {
         save(_items.value.map {if(it.packageName==packageName) it.copy(dismissedCount=it.count) else it})
     }
+    @Synchronized fun dismissAll() {if(_items.value.any {it.unread}) save(_items.value.map {it.copy(dismissedCount=it.count)})}
     @Synchronized fun clear() {save(emptyList())}
     private fun save(next: List<AdJump>) {
         val bounded=next.sortedByDescending {it.lastAt}.take(100)

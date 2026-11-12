@@ -42,8 +42,12 @@ private fun accessibilityListed(context: Context): Boolean {
         .any {ComponentName.unflattenFromString(it)==me}
 }
 
+/** [dismissAll] hides every reminder that is information rather than a broken setup; null when there is none. */
+internal class HealthState(val issues: List<HealthIssue>,val dismissAll: (() -> Unit)?)
+private fun HealthIssue.dismissible()=level==HealthLevel.INFO || id=="capture" || id.startsWith("ad_jump_") || id.startsWith("touch_refusal_")
+
 /** Re-reads system state every 1.5 s while the dashboard is in front; app state comes from its own flows. */
-@Composable internal fun rememberHealthIssues(missingKey: String?): List<HealthIssue> {
+@Composable internal fun rememberHealthIssues(missingKey: String?): HealthState {
     val context=LocalContext.current
     val app=context.applicationContext as TiaoApplication
     val repository=app.repository
@@ -53,6 +57,7 @@ private fun accessibilityListed(context: Context): Boolean {
     val refusals by repository.touchRefusals.items.collectAsState()
     val vision by repository.visionConnection.collectAsState()
     val touch by app.enhancedTouch.state.collectAsState()
+    val touchHealth by app.enhancedTouch.health.collectAsState()
     val wireless by app.wirelessBootstrap.state.collectAsState()
     var system by remember {mutableStateOf(Triple(true,true,false))}
     var tick by remember {mutableLongStateOf(0L)}
@@ -77,23 +82,41 @@ private fun accessibilityListed(context: Context): Boolean {
     val service=SkipAccessibilityService.instance
     val bound=connected && service!=null
     // The dashboard's own window changes produce events; none for 5 s after it came to front means a stalled service.
-    val silent=bound && tick-resumedAt>5000 && (service?.lastEventAt ?: 0L)<resumedAt
+    // The window event of coming to the front can arrive just before this screen records its resume time.
+    val silent=bound && tick-resumedAt>5000 && (service?.lastEventAt ?: 0L)<resumedAt-2000
     val (listed,wirelessOn,batteryLimited)=system
     val capture=service?.captureFailure?.takeIf {tick-it.first<10*60_000}?.second
-    return HealthCheck.evaluate(HealthSnapshot(
+    val prefs=remember {context.getSharedPreferences("health_dismissed",Context.MODE_PRIVATE)}
+    var dismissed by remember {mutableStateOf(prefs.getStringSet("ids",emptySet()).orEmpty().toSet())}
+    val all=HealthCheck.evaluate(HealthSnapshot(
         sdk=android.os.Build.VERSION.SDK_INT,accessibilityEnabled=listed,serviceBound=bound,serviceSilent=silent,
         autoSkip=settings.enabled,selectedApps=settings.packages.size,automaticLearning=settings.automaticLearning,
         cloudEnabled=settings.cloudEnabled,missingKey=missingKey,
         blockingAiError=vision.message.takeIf {vision.blocksRequests()},
         aiFallback=repository.fallbackVision()?.displayName?.takeIf {vision.blocksRequests()},
-        enhancedTouch=settings.enhancedTouch,enhancedReady=touch==TouchConnection.READY && app.enhancedTouch.ownedReady,
+        enhancedTouch=settings.enhancedTouch,enhancedReady=touch==TouchConnection.READY,
+        enhancedDenied=touch==TouchConnection.FAILED && touchHealth.reason=="inject_permission_denied",
         enhancedPaired=wireless.paired,wirelessDebugging=wirelessOn,
         // Only worth raising when the service has actually been lost; otherwise most phones would always show it.
         batteryRestricted=batteryLimited && (!listed || !bound || silent),
         captureFailure=capture,
         adJumps=jumps.filter {it.unread}.map {it.packageName to (labels[it.packageName] ?: it.packageName)},
         // Only apps still selected for skipping; a removed app's refusal is no longer actionable.
-        touchRefusals=refusals.filter {it.confirmed && it.packageName in settings.packages}.map {it.packageName to (labels[it.packageName] ?: it.packageName)}))
+        touchRefusals=refusals.filter {it.confirmed && !it.dismissed && it.packageName in settings.packages}.map {it.packageName to (labels[it.packageName] ?: it.packageName)}))
+    // A dismissed notice stays hidden only while it lasts: once the condition clears, a recurrence is shown again.
+    // Wait for the first system poll, whose defaults would otherwise make present conditions look cleared.
+    val present=all.map {it.id}.toSet()
+    LaunchedEffect(present,tick>0) {
+        if(tick>0 && !present.containsAll(dismissed)) {dismissed=dismissed intersect present;prefs.edit().putStringSet("ids",dismissed).apply()}
+    }
+    val issues=all.filterNot {it.level==HealthLevel.INFO && it.id in dismissed}
+    return HealthState(issues,if(issues.none {it.dismissible()}) null else ({
+        repository.adJumps.dismissAll();repository.touchRefusals.dismissAll()
+        SkipAccessibilityService.instance?.captureFailure=null
+        dismissed=dismissed+issues.filter {it.level==HealthLevel.INFO}.map {it.id}
+        prefs.edit().putStringSet("ids",dismissed).apply()
+        tick=SystemClock.elapsedRealtime()
+    }))
 }
 
 private val Amber=Color(0xFF5A3B12)
@@ -102,7 +125,7 @@ private fun HealthLevel.color()=when(this) {
 }
 
 /** One compact yellow line on the first screen; tapping it lists every issue with its fix. */
-@Composable internal fun HealthBar(issues: List<HealthIssue>,onAction: (HealthIssue) -> Unit,adJump: @Composable (String) -> Unit) {
+@Composable internal fun HealthBar(issues: List<HealthIssue>,onDismissAll: (() -> Unit)?=null,onAction: (HealthIssue) -> Unit,adJump: @Composable (String) -> Unit) {
     if(issues.isEmpty()) return
     var expanded by rememberSaveable {mutableStateOf(false)}
     var openJump by rememberSaveable {mutableStateOf<String?>(null)}
@@ -120,6 +143,8 @@ private fun HealthLevel.color()=when(this) {
                 if(!expanded) Text(issues.joinToString("、") {it.title},style=MaterialTheme.typography.bodySmall,color=Amber,
                     maxLines=1,overflow=TextOverflow.Ellipsis)
             }
+            if(onDismissAll!=null) TextButton(onClick=onDismissAll,contentPadding=PaddingValues(horizontal=8.dp,vertical=0.dp),
+                modifier=Modifier.semantics {contentDescription="忽略全部提醒"}) {Text("全部忽略",color=Amber)}
             QingIcon(QingGlyph.CHEVRON_DOWN,Modifier.rotate(if(expanded) 180f else 0f),size=20.dp,tint=Amber)
         }
         if(expanded) Column(Modifier.padding(start=16.dp,end=16.dp,bottom=14.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {

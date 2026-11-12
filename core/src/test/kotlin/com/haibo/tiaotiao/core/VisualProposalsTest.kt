@@ -68,12 +68,17 @@ class VisualProposalsTest {
         assertEquals("later",task.representative.id)
     }
 
-    @Test fun `apps versions orientation and distinct targets never share a task`() {
+    @Test fun `apps orientation and distinct targets never share a task`() {
         val variants=listOf(rule,rule.copy(id="app",packageName="org.example.shop"),
-            rule.copy(id="version",versionCode=2),rule.copy(id="landscape",scene=digest("landscape")),
+            rule.copy(id="landscape",scene=digest("landscape")),
             rule.copy(id="target",target=Area(.03f,.04f,.12f,.08f)))
         assertEquals(variants.size,VisualProposals.tasks(variants).size)
         variants.drop(1).forEach {assertFalse(VisualProposals.repeatedSample(rule,it))}
+    }
+    @Test fun `the same target learned on another app version joins the existing task`() {
+        val updated=rule.copy(id="version",versionCode=2,scene=digest("scene of version 2"))
+        assertTrue(VisualProposals.sameTarget(rule,updated))
+        assertEquals(1,VisualProposals.tasks(listOf(rule,updated)).size)
     }
 
     @Test fun `verified and paused variants retain their own status and management entry`() {

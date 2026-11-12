@@ -20,6 +20,13 @@ class TouchDispatchTest {
         assertTrue(routeTouch(true,{TouchDispatch.UNAVAILABLE},{fallback++;true}).completed)
         assertEquals(1,fallback)
     }
+    @Test fun `a refusal before any touch was sent falls back once`()=runBlocking {
+        var fallback=0
+        assertEquals(TouchResult("无障碍触控",true),routeTouch(true,{TouchDispatch.NOT_SENT},{fallback++;true}))
+        assertEquals(1,fallback)
+        // The guard objecting to the screen, or a touch that may have started, is never repeated elsewhere.
+        listOf("foreground_changed","display_changed","rate_limited","up_rejected","command_timeout").forEach {assertFalse(it in touchNotSent)}
+    }
     @Test fun `disabled system channel never invokes privileged code`()=runBlocking {
         var calls=0
         assertFalse(routeTouch(false,{calls++;TouchDispatch.COMPLETED},{false}).completed)

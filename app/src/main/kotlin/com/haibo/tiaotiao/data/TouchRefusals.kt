@@ -8,7 +8,9 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 
 /** Consecutive launches in which an app ignored TiaoTiao's accessibility touch on a credible skip control. */
-@Serializable data class TouchRefusal(val packageName: String,val sessions: Int=0,val lastAt: Long=0) {
+@Serializable data class TouchRefusal(val packageName: String,val sessions: Int=0,val lastAt: Long=0,
+    /** The user dismissed the dashboard reminder; the record still stops pointless retries. */
+    val dismissed: Boolean=false) {
     val confirmed get()=sessions>=CONFIRM_SESSIONS
     companion object { const val CONFIRM_SESSIONS=2 }
 }
@@ -33,6 +35,7 @@ class TouchRefusals(context: Context) {
     @Synchronized fun clear(packageName: String) {
         if(_items.value.any {it.packageName==packageName}) save(_items.value.filterNot {it.packageName==packageName})
     }
+    @Synchronized fun dismissAll() {if(_items.value.any {it.confirmed && !it.dismissed}) save(_items.value.map {if(it.confirmed) it.copy(dismissed=true) else it})}
     @Synchronized fun clear() {save(emptyList())}
     private fun save(next: List<TouchRefusal>) {
         val bounded=next.sortedByDescending {it.lastAt}.take(100)

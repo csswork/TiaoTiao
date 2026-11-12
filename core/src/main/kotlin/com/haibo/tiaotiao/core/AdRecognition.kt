@@ -18,8 +18,14 @@ object AdRecognition {
         candidates(screen).sortedBy {it.path}.forEach {append("|${it.path}:${it.resourceId}:${it.className}:${SignalText.canonical(it.label)}")}
         append(screen.nodes.map {SignalText.canonical(it.label)}.filter {it.isNotBlank()}.distinct().sorted().joinToString(";"))
     })
+    /** An app update keeps what was learned: a v2 scene is compared as if the screen still had the rule's version,
+     * so only the app and the display size have to match. The current frame still has to show the learned control
+     * (see VisualPolicy.canAttempt) before anything is touched. Legacy node-fingerprint scenes stay version-bound. */
     fun matchesScene(rule: VisualRule, screen: ScreenSnapshot) = rule.packageName==screen.packageName &&
-        rule.versionCode==screen.versionCode && rule.scene==if(rule.sceneVersion==2) scene(screen) else screen.fingerprint()
+        if(rule.sceneVersion==2) rule.scene==scene(screen.copy(versionCode=rule.versionCode))
+        else rule.versionCode==screen.versionCode && rule.scene==screen.fingerprint()
+    fun matchesNodeScene(rule: VisualRule, screen: ScreenSnapshot) =
+        rule.nodeScene==nodeScene(screen.copy(versionCode=rule.versionCode))
 
     fun matchesNode(selector: TargetSelector, screen: ScreenSnapshot) = candidates(screen).any {
         it.path==selector.path && it.resourceId==selector.resourceId && it.className==selector.className &&

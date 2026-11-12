@@ -96,11 +96,12 @@ class MainActivity : ComponentActivity() {
         var cloudDisclosure by remember { mutableStateOf(false) }
         var transferAction by remember { mutableStateOf<String?>(null) }
         var hasJevKey by remember { mutableStateOf(repository.vault.get("jevKey").isNotBlank()) }
-        val healthIssues = rememberHealthIssues(missingKey = when {
+        val health = rememberHealthIssues(missingKey = when {
             officialVision && !hasVisionKey -> "DeepSeek 官方 Key"
             !officialVision && !hasJevKey -> "Jev API Key"
             else -> null
         })
+        val healthIssues = health.issues
         var focusJevKey by remember { mutableStateOf(false) }
         var focusVisionKey by remember { mutableStateOf(intent.getBooleanExtra("configure_vision",false)) }
         var exportSmart by rememberSaveable { mutableStateOf(false) }
@@ -227,7 +228,7 @@ class MainActivity : ComponentActivity() {
                     0 -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         // Every problem that stops or degrades skipping, compact on the first screen.
                         if (healthIssues.isNotEmpty()) item(key = "health") {
-                            HealthBar(healthIssues, onAction = { issue -> when (issue.action) {
+                            HealthBar(healthIssues, onDismissAll = health.dismissAll, onAction = { issue -> when (issue.action) {
                                 HealthAction.ACCESSIBILITY_SETTINGS -> if (issue.id == "a11y_off") disclosure = true
                                     else startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                                 HealthAction.ENABLE_AUTO_SKIP -> repository.updateSettings { it.copy(enabled = true) }
@@ -266,7 +267,25 @@ class MainActivity : ComponentActivity() {
                     1 -> ApplicationsPage(repository,onlySelectedApps,{onlySelectedApps=it},onConfigure={focusJevKey=!hasJevKey;tab=4})
                     2 -> RuleListPage(entries,ruleFilter,{ruleFilter=it},{selectedRuleKey=it.key},
                         onImport={importer.launch(arrayOf("application/json","text/plain","application/octet-stream"))},
-                        onExport={transferAction="export"},onShare={transferAction="share"},busy=busy)
+                        onExport={transferAction="export"},onShare={transferAction="share"},busy=busy,
+                        onClearUnlearned={task {
+                            val targets=entries.filter {!it.verified && !it.paused}
+                            targets.forEach {item -> item.ordinary?.let {repository.remove(it.id)};item.variants.forEach {repository.removeVisual(it.id)}}
+                            // Queued samples and the "recently analysed" cache would otherwise delay learning these again.
+                            (application as TiaoApplication).visualLearner.clearPending()
+                            "已清空 ${targets.size} 个未学会的方案"
+                        }},
+                        onClearAll={task {
+                            val app=application as TiaoApplication
+                            val service=SkipAccessibilityService.instance
+                            // The running service must stop its scans first so that old results cannot reappear.
+                            if(service!=null) service.resetResults() else {
+                                val worker=app.visualLearner
+                                worker.closeAndJoin();worker.clearPending();repository.clearResults();app.skipStats.clear()
+                                app.visualLearner=com.haibo.tiaotiao.data.VisualLearner(app,repository)
+                            }
+                            "已清空全部学习结果，配置保留"
+                        }})
                     3 -> ProcessingLogPage(repository,busy,onClear={task {repository.clearLogs();"已清空记录"}})
                     4 -> SettingsPage(repository = repository, busy = busy, samples = samples,
                         hasJevKey = hasJevKey, focusJevKey = focusJevKey,

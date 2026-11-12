@@ -25,7 +25,7 @@ import com.haibo.tiaotiao.touch.TouchConnection
     val settings by app.repository.settings.collectAsState()
     var label by remember(jump.packageName) {mutableStateOf(app.appLabels.cached(jump.packageName) ?: jump.packageName)}
     LaunchedEffect(jump.packageName) {label=app.appLabels.load(jump.packageName)}
-    val prevented=settings.enhancedTouch && channel==TouchConnection.READY && app.enhancedTouch.ownedReady
+    val prevented=settings.enhancedTouch && channel==TouchConnection.READY
     val ink=Color(0xFF5A3B12)
     Card(Modifier.fillMaxWidth(),shape=RoundedCornerShape(24.dp),colors=CardDefaults.cardColors(containerColor=Color(0xFFFFF1DC)),
         border=BorderStroke(1.dp,Color(0xFFE9C58F))) {

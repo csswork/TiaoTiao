@@ -40,7 +40,10 @@ class AdRecognitionTest {
             nodeTarget=TargetSelector(exit.path,exit.resourceId,exit.className,exit.label,area),nodeScene=AdRecognition.nodeScene(s))
         assertTrue(VisualPolicy.canAttempt(r,s,VisualSignals(false,null,emptyList(),false),r.targetHash))
         assertFalse(VisualPolicy.canAttempt(r,s.copy(nodes=listOf(exit)),VisualSignals(false,null,emptyList(),false),r.targetHash))
-        assertFalse(VisualPolicy.canAttempt(r,s.copy(versionCode=2),VisualSignals(true,5,listOf(area),false),r.targetHash))
+        // An app update keeps the rule: the same control on the same display is still attempted.
+        assertTrue(VisualPolicy.canAttempt(r,s.copy(versionCode=2),VisualSignals(false,null,emptyList(),false),r.targetHash))
+        assertFalse(VisualPolicy.canAttempt(r,s.copy(versionCode=2,width=s.width+1),VisualSignals(true,5,listOf(area),false),r.targetHash))
+        assertFalse(VisualPolicy.canAttempt(r,s.copy(versionCode=2,packageName="org.example.other"),VisualSignals(true,5,listOf(area),false),r.targetHash))
         assertFalse(VisualPolicy.canAttempt(r,s,VisualSignals(true,5,listOf(area),true),r.targetHash))
     }
     @Test fun `dangerous or full-page controls cannot be offered as dismiss targets`() {

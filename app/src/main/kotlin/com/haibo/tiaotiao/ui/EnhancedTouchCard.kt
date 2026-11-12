@@ -31,7 +31,8 @@ import kotlinx.coroutines.launch
     var stopping by remember {mutableStateOf(false)}
     var connectPort by remember {mutableStateOf("")}
     val busy=wireless.phase in setOf(WirelessPhase.PAIRING,WirelessPhase.STARTING)
-    val ready=channel==TouchConnection.READY && app.enhancedTouch.ownedReady
+    val ready=channel==TouchConnection.READY
+    val denied=channel==TouchConnection.FAILED && health.reason=="inject_permission_denied"
     Card(Modifier.fillMaxWidth()) {Column(Modifier.padding(20.dp),verticalArrangement=Arrangement.spacedBy(10.dp)) {
         Text("增强点击 · 已内置",style=MaterialTheme.typography.titleMedium)
         Text("为已识别但点击无响应的广告提供系统触控。无需安装其他应用。")
@@ -39,20 +40,23 @@ import kotlinx.coroutines.launch
             Text("优先使用增强点击",Modifier.weight(1f))
             Switch(checked=settings.enhancedTouch,onCheckedChange={value ->app.repository.updateSettings {it.copy(enhancedTouch=value)}})
         }
-        Surface(color=when {ready ->MaterialTheme.colorScheme.primaryContainer;wireless.phase==WirelessPhase.FAILED ->MaterialTheme.colorScheme.errorContainer;else ->MaterialTheme.colorScheme.surfaceVariant},
+        Surface(color=when {ready ->MaterialTheme.colorScheme.primaryContainer;channel==TouchConnection.FAILED || wireless.phase==WirelessPhase.FAILED ->MaterialTheme.colorScheme.errorContainer;else ->MaterialTheme.colorScheme.surfaceVariant},
             shape=MaterialTheme.shapes.medium,modifier=Modifier.fillMaxWidth()) {
             Column(Modifier.padding(14.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-                Text(when {ready ->"增强点击服务已连接";busy ->"增强点击正在启动";channel==TouchConnection.FAILED ->"增强点击连接或权限异常";wireless.phase==WirelessPhase.FAILED ->"增强点击启动未完成";else ->"增强点击未启动"},style=MaterialTheme.typography.titleSmall)
-                Text(if(ready) {
-                    if(health.permission=="granted") "服务响应正常，系统触控权限可用。" else "本机服务已连接，正在检查触控权限。"
-                } else wireless.message,style=MaterialTheme.typography.bodySmall)
+                Text(when {ready ->"增强点击服务已连接";busy ->"增强点击正在启动";denied ->"系统拒绝了增强点击";channel==TouchConnection.FAILED ->"增强点击连接异常";wireless.phase==WirelessPhase.FAILED ->"增强点击启动未完成";else ->"增强点击未启动"},style=MaterialTheme.typography.titleSmall)
+                Text(when {
+                    ready ->if(health.permission=="granted") "服务响应正常，系统触控权限可用。" else "本机服务已连接，尚未发现触控被拒绝。"
+                    denied ->"服务已连接，但系统不允许它点击屏幕，目前自动改用普通点击。小米/红米/POCO 请在开发者选项中开启“USB 调试（安全设置）”，然后点下方“检查服务连接”。"
+                    channel==TouchConnection.FAILED ->"服务已连接但没有正常响应，目前自动改用普通点击。可停止后重新启动增强点击。"
+                    else ->wireless.message
+                },style=MaterialTheme.typography.bodySmall)
                 Text("最近点击：${lastAction?.let {touchReason(it.reason)} ?: "尚无记录"}",style=MaterialTheme.typography.bodySmall)
                 Text("广告结果：${lastResult?.let {touchReason(it.reason)} ?: "尚未确认本次广告关闭"}",style=MaterialTheme.typography.bodySmall)
             }
         }
         TextButton(onClick={scope.launch {app.enhancedTouch.probe("user_check")}}) {Text("检查服务连接")}
         if(Build.VERSION.SDK_INT>=30) {
-            if(ready) OutlinedButton(onClick={scope.launch {
+            if(ready || channel==TouchConnection.FAILED) OutlinedButton(onClick={scope.launch {
                 stopping=true
                 try {app.enhancedTouch.stopOwned()} finally {stopping=false}
             }},enabled=!stopping) {Text("停止增强点击")}
