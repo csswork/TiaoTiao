@@ -256,8 +256,12 @@ class AutoLearning(private val service: SkipAccessibilityService,
                 val checkStarted=SystemClock.elapsedRealtime()
                 // A learned rule whose literal skip/close label was read at this spot in a frame under 500 ms old needs no
                 // second screenshot; the touch service still re-checks the foreground app and window before injecting.
-                val freshlyLabelled=chosen.active() && checkStarted-frame.at<500 &&
-                    (VisualPolicy.controlTarget(clickArea,frame.signals.explicitSkips)!=null || (chosen.tapMethod==TapMethod.ACCESSIBILITY && VisualPolicy.nativeTarget(chosen,screen,chosen.target)!=null))
+                // The same holds for a scheme still being learned: the label read at the touch point is the evidence, not
+                // the scheme's history. A second screenshot has to wait out the platform's 350 ms interval and, on a busy
+                // launch, cost up to a second while the ad stayed on screen.
+                val freshlyLabelled=checkStarted-frame.at<800 &&
+                    (VisualPolicy.controlTarget(clickArea,frame.signals.explicitSkips)!=null ||
+                        (chosen.active() && chosen.tapMethod==TapMethod.ACCESSIBILITY && VisualPolicy.nativeTarget(chosen,screen,chosen.target)!=null))
                 val unchanged=freshlyLabelled || try {capture.targetUnchanged(frame,clickArea)} catch(c: CancellationException) {throw c} catch(_: Exception) {false}
                 val checkMs=SystemClock.elapsedRealtime()-checkStarted
                 if(!unchanged) {

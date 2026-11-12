@@ -27,6 +27,9 @@ object VisualProposals {
     /** Keep the original rule and its proof when another frame describes the same action. */
     fun repeatedSample(a: VisualRule, b: VisualRule): Boolean {
         if (!sameTarget(a, b) || a.tapMethod != b.tapMethod) return false
+        // A literal "跳过" read at the same spot is the same control whatever creative is behind it; comparing the
+        // creative made every new ad start a separate scheme for one button.
+        if (a.source == VisualExecution.LOCAL_SOURCE && b.source == VisualExecution.LOCAL_SOURCE) return true
         val first = a.nodeTarget
         val second = b.nodeTarget
         if (first != null && second != null) return (a.nodeScene == b.nodeScene || a.versionCode != b.versionCode) &&
@@ -35,6 +38,18 @@ object VisualProposals {
         if (first != null || second != null) return false
         return similarHash(a.targetHash, b.targetHash, 5) &&
             (a.contextHash == b.contextHash || similarHash(a.contextHash, b.contextHash, 4))
+    }
+
+    /** Folds literal-skip schemes that describe one button (see repeatedSample) into the best of them: a working
+     * one, else the one with most proof, else the newest. Schemes the user paused are never touched. */
+    fun consolidate(rules: List<VisualRule>): List<VisualRule> {
+        fun literal(rule: VisualRule) = rule.source == VisualExecution.LOCAL_SOURCE && !VisualPolicy.userPaused(rule)
+        val kept = mutableListOf<VisualRule>()
+        rules.sortedWith(compareByDescending<VisualRule> { it.active() }.thenByDescending { it.successfulSessions() }
+            .thenByDescending { it.createdAt }).forEach { rule ->
+            if (!literal(rule) || kept.none { literal(it) && repeatedSample(it, rule) }) kept += rule
+        }
+        return rules.filter { rule -> kept.any { it === rule } }
     }
 
     /** Different ad creatives and recognition engines are variants of one pending target. */

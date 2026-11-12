@@ -58,12 +58,16 @@ class AppRepository(private val context: Context) {
     val previews=VisualPreviewStore(context.filesDir)
     private val visualFile = AtomicFile(File(context.filesDir, "visual_rules.json"))
     private val _visualRules = MutableStateFlow(runCatching {
-        VisualPolicy.decode(String(visualFile.readFully(), Charsets.UTF_8)).rules.map(VisualPolicy::migrateExecution)
+        VisualProposals.consolidate(VisualPolicy.decode(String(visualFile.readFully(), Charsets.UTF_8)).rules.map(VisualPolicy::migrateExecution))
     }.getOrElse {
         if (visualFile.baseFile.exists()) visualFile.baseFile.copyTo(File(context.filesDir,"visual_rules.recovery.json"),overwrite=true)
         emptyList()
     })
     val visualRules = _visualRules.asStateFlow()
+    init {
+        // Screenshots of schemes folded away on load (or otherwise gone) go with them.
+        runCatching {previews.entries.value.map {it.ruleId}.distinct().filter {id -> _visualRules.value.none {it.id==id}}.forEach(previews::remove)}
+    }
     @Synchronized fun confirmVisual(rule: VisualRule) {
         val current=_visualRules.value.find {it.id==rule.id && it.behavior()==rule.behavior()} ?: error("方案已改变，请重新查看后确认")
         putVisual(VisualPolicy.confirm(current,System.currentTimeMillis()))

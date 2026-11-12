@@ -16,6 +16,26 @@ class VisualRecoveryTest {
         assertEquals(VisualRuleState.CANDIDATE,recovered.state);assertTrue(recovered.evidence.isEmpty())
         assertFalse(recovered.active())
     }
+    @Test fun `a proven scheme survives one negative review and pauses on the second`() {
+        val proven=VisualPolicy.record(VisualPolicy.record(rule,"one",true,true,true,1),"two",true,true,true,2)
+        assertTrue(proven.active())
+        val struck=VisualPolicy.record(proven,"three",true,false,true,3)
+        assertTrue(struck.active());assertEquals(1,struck.automaticFailures)
+        // A success in between clears the strike; two negatives in a row pause it.
+        assertEquals(0,VisualPolicy.record(struck,"four",true,true,true,4).automaticFailures)
+        assertEquals(VisualRuleState.PAUSED,VisualPolicy.record(struck,"four",true,false,true,4).state)
+        // One proof is not enough to earn the tolerance.
+        assertEquals(VisualRuleState.PAUSED,VisualPolicy.record(VisualPolicy.record(rule,"one",true,true,true,1),"two",true,false,true,2).state)
+    }
+    @Test fun `literal skip schemes for one button fold into the best one whatever the creative`() {
+        val local=rule.copy(source=VisualExecution.LOCAL_SOURCE)
+        val other=local.copy(id="creative",createdAt=5,targetHash="10".repeat(32),contextHash="0011".repeat(16))
+        assertTrue(VisualProposals.repeatedSample(local,other))
+        val proven=VisualPolicy.record(VisualPolicy.record(other,"one",true,true,true,1),"two",true,true,true,2)
+        val stopped=local.copy(id="user",state=VisualRuleState.PAUSED,lastResult="用户反馈点错，已停用")
+        val model=rule.copy(id="model",targetHash="10".repeat(32))
+        assertEquals(listOf("user","model","creative"),VisualProposals.consolidate(listOf(local,stopped,model,proven)).map {it.id})
+    }
     @Test fun `repeated failures back off then stop relearning until the user acts`() {
         var current=rule
         for(delay in listOf(15_000L,60_000L)) {

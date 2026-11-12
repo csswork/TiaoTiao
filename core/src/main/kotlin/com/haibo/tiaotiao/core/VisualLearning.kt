@@ -184,6 +184,10 @@ object VisualPolicy {
     }
     fun record(rule: VisualRule, session: String, early: Boolean, home: Boolean, sameApp: Boolean, now: Long, timingBasis: String = "countdown",
         local: Boolean = false): VisualRule {
+        // A scheme that already closed ads in two launches is not thrown back to relearning by one negative review:
+        // reviews misjudge busy home pages, and a tap can land on a creative once. The second one in a row pauses it.
+        if ((!home || !sameApp) && rule.successfulSessions()>=2 && rule.automaticFailures==0 && rule.state!=VisualRuleState.PAUSED)
+            return rule.copy(automaticFailures=1,lastResult="本次结果复核未通过，方案保留；再次未通过将暂停并重新识别")
         if (!home || !sameApp) return pauseAutomatically(rule,"自动检查未通过，稍后自动重新识别",now)
         require(timingBasis in setOf("countdown","observed_baseline","explicit_label","quick_close","unknown"))
         val proof = AutoEvidence(session, rule.behavior(), now, early, home, sameApp,timingBasis,local)
